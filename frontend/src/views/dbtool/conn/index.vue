@@ -297,7 +297,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { reactive, ref, computed } from 'vue'
 import { ArrowDown, CircleClose } from '@element-plus/icons-vue'
 
-const { proxy } = getCurrentInstance()
 const loading = ref(false)
 const importVisible = ref(false)
 const backupVisible = ref(false)
