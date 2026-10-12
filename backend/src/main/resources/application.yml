@@ -10,15 +10,13 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://127.0.0.1:3306/dbtool?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
     username: root
-    password: root
-    # 生产环境请改为你的 MySQL 密码
+    password: pansoft2026
   data:
     redis:
       host: 127.0.0.1
       port: 6379
       database: 0
-      password:
-      # 生产环境如有 Redis 密码请填写
+      password: pansoft2026
   servlet:
     multipart:
       max-file-size: 100MB
