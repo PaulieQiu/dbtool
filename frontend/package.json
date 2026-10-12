@@ -15,7 +15,7 @@
     "axios": "^1.6.8",
     "pinia": "^2.1.7",
     "ag-grid-community": "^31.0.0",
-    "ag-grid-vue3": "^3.0.0",
+    "ag-grid-vue3": "36.1.0",
     "monaco-editor": "^0.50.0",
     "sql-formatter": "^15.8.2",
     "highlight.js": "^11.9.0"
