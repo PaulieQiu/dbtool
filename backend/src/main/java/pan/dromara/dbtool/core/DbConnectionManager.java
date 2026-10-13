@@ -41,10 +41,16 @@ public class DbConnectionManager {
 
     private final DbDriverManager driverManager;
     private final SshTunnelService sshTunnelService;
+    private final Neo4jDriverManager neo4jDriverManager;
+    private final DbTransactionSessionRegistry transactionSessionRegistry;
 
-    public DbConnectionManager(DbDriverManager driverManager, SshTunnelService sshTunnelService) {
+    public DbConnectionManager(DbDriverManager driverManager, SshTunnelService sshTunnelService,
+                               Neo4jDriverManager neo4jDriverManager,
+                               DbTransactionSessionRegistry transactionSessionRegistry) {
         this.driverManager = driverManager;
         this.sshTunnelService = sshTunnelService;
+        this.neo4jDriverManager = neo4jDriverManager;
+        this.transactionSessionRegistry = transactionSessionRegistry;
     }
 
     /**
@@ -76,6 +82,10 @@ public class DbConnectionManager {
      */
     public HikariDataSource createDataSource(DbConn conn) {
         DbTypeInfo info = resolveType(conn);
+        // Neo4j 为图数据库专属链路（官方 Bolt Driver），不通过 Hikari JDBC 连接池
+        if ("NEO4J".equalsIgnoreCase(conn.getDbType())) {
+            throw new ServiceException("Neo4j 为图数据库专属链路，请在数据库工作台双击连接打开「Neo4j 工作区」，不支持 JDBC 连接池");
+        }
         // 非内置 JDBC 类型驱动未就绪时提前抛出中文提示(避免 Hikari 报英文 Failed to load driver class)
         if (info != null && StrUtil.isNotBlank(info.getDriverClass())
             && !Boolean.TRUE.equals(info.getBuiltin())
@@ -130,7 +140,7 @@ public class DbConnectionManager {
     private DbTypeInfo resolveType(DbConn conn) {
         DbTypeInfo info = DbTypeRegistry.of(conn.getDbType());
         if (info == null) {
-            info = DbTypeRegistry.of("MYSQL");
+            throw new ServiceException("未知数据库类型: " + conn.getDbType() + ", 请检查连接配置或驱动注册");
         }
         if (!Boolean.TRUE.equals(info.getBuiltin())) {
             driverManager.ensureDriver(info.getCode());
@@ -153,6 +163,10 @@ public class DbConnectionManager {
             // Elasticsearch: 使用 REST API + REST SQL 验证(ES 7.x JDBC 需白金许可, REST 在 Basic 许可可用)
             if ("ELASTICSEARCH".equalsIgnoreCase(conn.getDbType())) {
                 return testElasticsearchConnection(conn);
+            }
+            // Neo4j: 使用官方 Bolt Driver 验证(原生图协议)
+            if ("NEO4J".equalsIgnoreCase(conn.getDbType())) {
+                return neo4jDriverManager.test(conn);
             }
             DbTypeInfo info = resolveType(conn);
             // 非内置 JDBC 类型驱动未就绪时提前返回中文提示(避免进入 JDBC 后报英文 No suitable driver / 未知错误)
@@ -207,8 +221,9 @@ public class DbConnectionManager {
         int port = endpoint.port == null ? 9200 : endpoint.port;
         String password = DbConnCrypto.decrypt(conn.getPassword());
         String url = "http://" + endpoint.host + ":" + port + path;
+        HttpURLConnection http = null;
         try {
-            HttpURLConnection http = (HttpURLConnection) new URL(url).openConnection();
+            http = (HttpURLConnection) new URL(url).openConnection();
             http.setRequestMethod(method);
             http.setConnectTimeout(8000);
             http.setReadTimeout(60000);
@@ -245,6 +260,10 @@ public class DbConnectionManager {
             throw new ServiceException("无法解析主机地址: " + conn.getHost());
         } catch (Exception e) {
             throw new ServiceException("Elasticsearch 请求失败: " + e.getMessage());
+        } finally {
+            if (http != null) {
+                http.disconnect();
+            }
         }
     }
 
@@ -487,6 +506,10 @@ public class DbConnectionManager {
             ds.close();
             log.info("数据库连接池关闭: connId={}", connId);
         }
+        // 回滚并释放该连接全部活动事务会话(避免借出连接在池关闭后仍被持有)
+        transactionSessionRegistry.releaseAllByConn(connId);
+        // Neo4j 官方 Driver 级联关闭(连接编辑/删除/池关闭路径)
+        neo4jDriverManager.close(connId);
         // 级联关闭 SSH 隧道(连接编辑/删除/池关闭路径)
         sshTunnelService.closeTunnel(connId);
     }

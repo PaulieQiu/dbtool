@@ -91,19 +91,10 @@ public class DbMetaServiceImpl implements IDbMetaService {
      * 查询语句判定
      */
     private static final Pattern SELECT_PATTERN = Pattern.compile("^\\s*(select|show|describe|desc|explain|with)\\b", Pattern.CASE_INSENSITIVE);
-
-    /**
-     * 高危SQL判定: DROP / TRUNCATE / 无条件DELETE / 无条件UPDATE
-     */
-    private static final Pattern DANGEROUS_DROP_PATTERN = Pattern.compile("^\\s*drop\\s+(database|schema|table|index|view|trigger|procedure|function|event)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern DANGEROUS_TRUNCATE_PATTERN = Pattern.compile("^\\s*truncate\\s+(table\\s+)?", Pattern.CASE_INSENSITIVE);
-    private static final Pattern DANGEROUS_ALTER_PATTERN = Pattern.compile("^\\s*alter\\s+(table|database|schema|view)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern DELETE_PATTERN = Pattern.compile("^\\s*delete\\s+from\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern UPDATE_PATTERN = Pattern.compile("^\\s*update\\s+\\S+\\s+set\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern WHERE_PATTERN = Pattern.compile("\\bwhere\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern SIMPLE_TABLE_SELECT = Pattern.compile(
-        "(?is)^\\s*select\\s+\\*\\s+from\\s+((?:`(?:``|[^`])+`|\"(?:\"\"|[^\"])+\"|\\[[^\\]]+\\]|[\\w$-]+)(?:\\s*\\.\\s*(?:`(?:``|[^`])+`|\"(?:\"\"|[^\"])+\"|\\[[^\\]]+\\]|[\\w$-]+))?)(.*)$"
-    );
+    /** LIMIT 关键字判定(修复 \b 退格符导致的永不匹配问题) */
+    private static final Pattern LIMIT_PATTERN = Pattern.compile("\\blimit\\b", Pattern.CASE_INSENSITIVE);
+    /** META 语句判定(SHOW/DESCRIBE/DESC) */
+    private static final Pattern META_STATEMENT_PATTERN = Pattern.compile("^\\s*(show|describe|desc)\\b", Pattern.CASE_INSENSITIVE);
 
     /**
      * 最大查询返回行数保护
@@ -879,8 +870,8 @@ public class DbMetaServiceImpl implements IDbMetaService {
             attachQueryExecution(executionId, execution, stmt);
             // 分页: MySQL 追加 LIMIT (SQL 已含 LIMIT 时不追加)
             String finalSql = trimSql;
-            boolean hasLimit = Pattern.compile("\\blimit\\b", Pattern.CASE_INSENSITIVE).matcher(trimSql).find();
-            boolean isMetaStatement = Pattern.compile("^\\s*(show|describe|desc)\\b", Pattern.CASE_INSENSITIVE).matcher(trimSql).find();
+            boolean hasLimit = LIMIT_PATTERN.matcher(trimSql).find();
+            boolean isMetaStatement = META_STATEMENT_PATTERN.matcher(trimSql).find();
             if (pageNum != null && pageSize != null && pageSize > 0 && !hasLimit && !isMetaStatement) {
                 int offset = Math.max(pageNum - 1, 0) * pageSize;
                 String pageSql = dialect(conn).paginate(trimSql, offset, pageSize);
@@ -1198,7 +1189,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
         // 分页: ES REST SQL 仅支持 LIMIT count(单值), 不支持 MySQL 的 LIMIT offset,size
         // 故查询 offset+fetch 条后在内存中截取 offset 之后的 fetch 条
         String finalSql = trimSql;
-        boolean hasLimit = Pattern.compile("\blimit\b", Pattern.CASE_INSENSITIVE).matcher(trimSql).find();
+        boolean hasLimit = LIMIT_PATTERN.matcher(trimSql).find();
         if (!hasLimit) {
             finalSql = trimSql + " LIMIT " + (offset + fetch);
         }

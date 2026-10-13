@@ -47,4 +47,12 @@ public interface IDbBackupService {
      * 查询任务详情
      */
     Map<String, Object> getJob(Long jobId, String userId);
+
+    /**
+     * 校验并解析备份文件(仅允许本服务备份目录内), 供下载使用
+     *
+     * @param filePath 备份文件绝对路径
+     * @return 规范化的文件路径
+     */
+    java.nio.file.Path resolveBackupFile(String filePath);
 }

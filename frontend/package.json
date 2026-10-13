@@ -9,16 +9,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "vue": "^3.4.21",
-    "element-plus": "^2.7.0",
     "@element-plus/icons-vue": "^2.3.1",
-    "axios": "^1.6.8",
-    "pinia": "^2.1.7",
     "ag-grid-community": "36.1.0",
     "ag-grid-vue3": "36.1.0",
+    "axios": "^1.6.8",
+    "cytoscape": "^3.34.3",
+    "element-plus": "^2.7.0",
+    "highlight.js": "^11.9.0",
     "monaco-editor": "^0.50.0",
+    "pinia": "^2.1.7",
     "sql-formatter": "^15.8.2",
-    "highlight.js": "^11.9.0"
+    "vue": "^3.4.21"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.4",

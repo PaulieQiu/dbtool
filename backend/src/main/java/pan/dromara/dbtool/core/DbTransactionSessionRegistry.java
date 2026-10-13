@@ -97,6 +97,20 @@ public class DbTransactionSessionRegistry {
     }
 
     /**
+     * 回滚并释放某连接下全部活动事务会话(连接被编辑/删除/池关闭时调用, 避免借出连接泄漏)
+     */
+    public void releaseAllByConn(Long connId) {
+        if (connId == null) {
+            return;
+        }
+        for (TransactionSession ts : sessions.values()) {
+            if (connId.equals(ts.getConnId()) && sessions.remove(ts.sessionId, ts)) {
+                rollbackAndRelease(ts);
+            }
+        }
+    }
+
+    /**
      * 回滚并归还连接(重置 autoCommit/readOnly 并清警告, 避免连接池状态泄漏)
      */
     public void rollbackAndRelease(TransactionSession ts) {

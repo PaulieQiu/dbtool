@@ -104,11 +104,13 @@ public class DbBackupController {
     public ResponseEntity<?> download(@PathVariable Long id) {
         Map<String, Object> job = backupService.getJob(id, StpUtil.getLoginIdAsString());
         String filePath = job.get("filePath") == null ? null : String.valueOf(job.get("filePath"));
-        if (filePath == null || !Files.isRegularFile(Paths.get(filePath))) {
-            return ResponseEntity.badRequest().body("备份文件不存在");
+        Path path;
+        try {
+            path = backupService.resolveBackupFile(filePath);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body("备份文件不存在或不在备份目录内");
         }
         try {
-            Path path = Paths.get(filePath);
             File file = path.toFile();
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.parseMediaType("application/sql"));

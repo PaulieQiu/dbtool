@@ -147,10 +147,11 @@ public class DbTypeRegistry {
             "redis://{host}:{port}/{db}", false));
 
         // ============ 图数据库 ============
-        reg(new DbTypeInfo("NEO4J", "Neo4j", "图数据库", false, "neo4j", 7687,
-            "org.neo4j.jdbc.bolt.BoltDriver", "org.neo4j:neo4j-jdbc", "6.0.2",
-            List.of("6.0.2", "5.1.0"),
-            "jdbc:neo4j:bolt://{host}:{port}/", false));
+        // Neo4j 采用官方 Java Driver(Bolt) 专属链路, 不依赖驱动管理下载 jar(builtin=true, 应用 classpath 内置)
+        reg(new DbTypeInfo("NEO4J", "Neo4j", "图数据库", true, "neo4j", 7687,
+            "org.neo4j.driver.Driver", "org.neo4j.driver:neo4j-java-driver", "5.21.0",
+            List.of("5.21.0", "5.20.0"),
+            "bolt://{host}:{port}", true));
         reg(new DbTypeInfo("ORIENTDB", "OrientDB", "图数据库", false, "orientdb", 2424,
             "com.orientechnologies.orient.jdbc.OrientJdbcDriver", "com.orientechnologies:orientdb-jdbc", "3.2.25",
             List.of("3.2.25"),
@@ -316,6 +317,13 @@ public class DbTypeRegistry {
             return caps;
         }
         if ("ELASTICSEARCH".equals(c)) {
+            caps.add("query");
+            caps.add("browse");
+            caps.add("verified");
+            return caps;
+        }
+        // Neo4j: 图数据库专属能力(Cypher 查询 + 图/Schema 浏览)
+        if ("NEO4J".equals(c)) {
             caps.add("query");
             caps.add("browse");
             caps.add("verified");

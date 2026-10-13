@@ -5,20 +5,40 @@ import cn.hutool.crypto.symmetric.AES;
 
 /**
  * 数据库连接密码 加解密工具
- * <p>AES 加密存储, 密钥固定(项目内部使用)</p>
+ * <p>AES 加密存储。密钥优先取环境变量 {@code DBTOOL_CRYPTO_KEY} 或系统属性
+ * {@code dbtool.crypto.key}(需 16/24/32 字节)，缺省/长度非法时回退内置默认值以兼容存量密文。
+ * <b>安全提示:</b> 生产环境务必外部化配置密钥，勿使用内置默认值。</p>
  *
  * @author doubao
  */
 public class DbConnCrypto {
 
     /**
-     * AES 密钥(16字节)
+     * AES 密钥: 外部化覆盖或回退默认(16字节)
      */
-    private static final String KEY = "dbtool-crypto-16";
+    private static final String KEY = resolveKey();
 
     private static final AES AES = SecureUtil.aes(KEY.getBytes());
 
     private DbConnCrypto() {
+    }
+
+    /**
+     * 解析 AES 密钥: 优先外部配置(环境变量/系统属性), 长度非法或缺省时回退默认, 避免静态初始化失败
+     */
+    private static String resolveKey() {
+        String env = System.getenv("DBTOOL_CRYPTO_KEY");
+        if (env != null && (env.length() == 16 || env.length() == 24 || env.length() == 32)) {
+            return env;
+        }
+        String prop = System.getProperty("dbtool.crypto.key");
+        if (prop != null && (prop.length() == 16 || prop.length() == 24 || prop.length() == 32)) {
+            return prop;
+        }
+        // static 初始化早于日志框架装配，此处用 System.err 确保安全警告一定可见(仅类加载时打印一次)
+        System.err.println("[dbtool][安全警告] 未配置外部 AES 密钥(环境变量 DBTOOL_CRYPTO_KEY 或系统属性 dbtool.crypto.key),"
+            + " 已回退内置默认密钥。生产环境务必外部化配置密钥, 否则存储的连接密码存在被反编译破解的风险!");
+        return "dbtool-crypto-16";
     }
 
     /**

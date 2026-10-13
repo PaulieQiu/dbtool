@@ -46,8 +46,13 @@ public class DataTransferController {
     @SaCheckPermission("dbtool:meta:edit")
     @PostMapping("/migrate")
     public R<Map<String, Object>> migrate(@RequestBody Map<String, Object> body) {
-        Long srcConnId = Long.valueOf(String.valueOf(body.get("srcConnId")));
-        Long dstConnId = Long.valueOf(String.valueOf(body.get("dstConnId")));
+        Object srcRaw = body.get("srcConnId");
+        Object dstRaw = body.get("dstConnId");
+        if (srcRaw == null || dstRaw == null) {
+            throw new ServiceException("源/目标连接ID不能为空");
+        }
+        Long srcConnId = Long.valueOf(String.valueOf(srcRaw));
+        Long dstConnId = Long.valueOf(String.valueOf(dstRaw));
         String srcSchema = (String) body.get("srcSchema");
         String srcTable = (String) body.get("srcTable");
         String dstSchema = (String) body.get("dstSchema");

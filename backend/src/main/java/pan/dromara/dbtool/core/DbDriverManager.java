@@ -117,7 +117,7 @@ public class DbDriverManager {
             registered.remove(info.getCode().toUpperCase());
             return target;
         } catch (Exception e) {
-            log.error("驱动下载失败: {}", e.getMessage());
+            log.error("驱动下载失败", e);
             throw new RuntimeException("驱动下载失败: " + e.getMessage(), e);
         }
     }
@@ -132,18 +132,30 @@ public class DbDriverManager {
      * @return 保存后的 jar 文件
      */
     public File saveUploadedDriver(String dbType, String version, InputStream inputStream, String originalName) {
+        // dbType/version 白名单字符过滤, 防路径分隔符/.. 穿越写出驱动目录
+        String safeType = safeName(dbType);
+        String safeVer = safeName(StrUtil.blankToDefault(version, "custom"));
+        if (StrUtil.isBlank(safeType)) {
+            throw new IllegalArgumentException("数据库类型不能为空");
+        }
         File dir = getDriverDir();
-        String ver = StrUtil.blankToDefault(version, "custom");
-        String jarName = (StrUtil.blankToDefault(dbType, "unknown") + "-" + ver + ".jar").toLowerCase();
+        String jarName = (safeType + "-" + safeVer + ".jar").toLowerCase();
         File target = new File(dir, jarName);
         try {
             Files.copy(inputStream, target.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            loaderCache.remove(dbType.toUpperCase());
-            registered.remove(dbType.toUpperCase());
+            loaderCache.remove(safeType.toUpperCase());
+            registered.remove(safeType.toUpperCase());
             return target;
         } catch (Exception e) {
             throw new RuntimeException("驱动保存失败: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 文件名安全化: 仅保留字母数字 _ - . , 去除路径分隔符与 .. 防路径穿越
+     */
+    private static String safeName(String raw) {
+        return raw == null ? "" : raw.replaceAll("[^A-Za-z0-9_\\-.]", "");
     }
 
     /**
@@ -240,8 +252,11 @@ public class DbDriverManager {
     private URLClassLoader buildLoader(String dbType) throws Exception {
         List<File> jars = listDriverJars();
         List<URL> urls = new ArrayList<>();
+        String prefix = dbType.toLowerCase() + "-";
         for (File jar : jars) {
-            if (jar.getName().toLowerCase().startsWith(dbType.toLowerCase() + "-")) {
+            String name = jar.getName().toLowerCase();
+            // 仅加载 类型-版本 命名的驱动 jar(版本以数字开头), 避免误载同前缀的其他文件
+            if (name.startsWith(prefix) && name.substring(prefix.length()).matches("\\d.*")) {
                 urls.add(jar.toURI().toURL());
             }
         }
@@ -273,9 +288,11 @@ public class DbDriverManager {
             }
         }
         registered.remove(key);
-        // 删除目录下匹配的 jar
+        // 删除目录下 类型-版本 命名的 jar(版本以数字开头), 避免误删同前缀的非驱动文件
+        String prefix = key.toLowerCase() + "-";
         for (File jar : listDriverJars()) {
-            if (jar.getName().toLowerCase().startsWith(key.toLowerCase() + "-")) {
+            String name = jar.getName().toLowerCase();
+            if (name.startsWith(prefix) && name.substring(prefix.length()).matches("\\d.*")) {
                 FileUtil.del(jar);
             }
         }

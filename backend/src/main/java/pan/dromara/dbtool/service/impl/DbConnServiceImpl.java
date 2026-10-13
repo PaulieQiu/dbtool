@@ -14,6 +14,7 @@ import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -29,13 +30,16 @@ import java.util.List;
 public class DbConnServiceImpl implements IDbConnService {
 
     /**
-     * 本地 Redis 数据源参数(启动时自动创建, 按本机环境配置调整)
+     * 本地 Redis 数据源参数(启动时自动创建, 可经配置覆盖)
      */
     private static final String LOCAL_REDIS_NAME = "本地Redis";
     private static final String LOCAL_REDIS_HOST = "127.0.0.1";
     private static final int LOCAL_REDIS_PORT = 6379;
     private static final String LOCAL_REDIS_DB = "0";
-    private static final String LOCAL_REDIS_PASSWORD = "pansoft2026";
+
+    /** 本地 Redis 密码(可经 dbtool.local.redis.password 配置覆盖, 默认占位由本机环境决定) */
+    @Value("${dbtool.local.redis.password:}")
+    private String localRedisPassword;
 
     private final DbConnMapper dbConnMapper;
     private final DbConnectionManager connectionManager;
@@ -62,12 +66,12 @@ public class DbConnServiceImpl implements IDbConnService {
             redis.setPort(LOCAL_REDIS_PORT);
             redis.setDatabaseName(LOCAL_REDIS_DB);
             redis.setUsername("");
-            redis.setPassword(DbConnCrypto.encrypt(LOCAL_REDIS_PASSWORD));
+            redis.setPassword(DbConnCrypto.encrypt(localRedisPassword));
             redis.setStatus("0");
             dbConnMapper.insert(redis);
             log.info("已自动创建本地 Redis 数据源: {}:{}", LOCAL_REDIS_HOST, LOCAL_REDIS_PORT);
         } catch (Exception e) {
-            log.warn("自动创建本地 Redis 数据源失败: {}", e.getMessage());
+            log.warn("自动创建本地 Redis 数据源失败", e);
         }
     }
 

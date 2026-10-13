@@ -9,6 +9,7 @@ import pan.dromara.dbtool.service.IDbMetaService;
 
 import cn.hutool.core.util.StrUtil;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
@@ -17,7 +18,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -34,6 +37,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -108,7 +112,7 @@ public class DbBackupServiceImpl implements IDbBackupService {
                 ) COMMENT='dbtool备份/恢复任务记录'
                 """);
         } catch (Exception e) {
-            log.warn("dbtool_backup_job 建表失败: {}", e.getMessage());
+            log.warn("dbtool_backup_job 建表失败", e);
         }
         Long maxId = jdbcTemplate.queryForObject("SELECT IFNULL(MAX(id), 0) FROM dbtool_backup_job", Long.class);
         jobIdSeq.set(maxId == null ? 0L : maxId);
@@ -117,10 +121,30 @@ public class DbBackupServiceImpl implements IDbBackupService {
         cleanupExpiredBackups();
     }
 
+    /**
+     * 应用停机时优雅关闭备份执行器
+     */
+    @PreDestroy
+    public void destroy() {
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
     @Override
     public Long startDump(Long connId, String schema, String userId) {
         if (connId == null || StrUtil.isBlank(schema)) {
             throw new ServiceException("连接ID与数据库名不能为空");
+        }
+        // 数据库名用于生成备份文件名, 拒绝路径分隔符/.. 防路径穿越写出备份目录
+        if (schema.contains("/") || schema.contains("\\") || schema.contains("..")) {
+            throw new ServiceException("数据库名不合法: 不允许包含路径分隔符或 ..");
         }
         DbConn conn = metaService.getConn(connId);
         requireMysql(conn);
@@ -292,7 +316,7 @@ public class DbBackupServiceImpl implements IDbBackupService {
             // 备份成功后执行保留策略(按天/按份数清理旧文件)
             cleanupExpiredBackups();
         } catch (Exception e) {
-            log.warn("备份任务失败: {}", e.getMessage());
+            log.warn("备份任务失败", e);
             record.status = "FAILED";
             record.errorMsg = e.getMessage();
             record.finishedAt = LocalDateTime.now();
@@ -319,10 +343,11 @@ public class DbBackupServiceImpl implements IDbBackupService {
             command.add("--default-character-set=utf8mb4");
             command.add(schema);
             process = runProcess(command, decrypt(conn.getPassword()));
-            // 备份文件作为 stdin 输入
-            process.getOutputStream().write(Files.readAllBytes(source));
-            process.getOutputStream().flush();
-            process.getOutputStream().close();
+            // 备份文件作为 stdin 输入(流式复制, 避免大文件整读入内存 OOM)
+            try (InputStream in = Files.newInputStream(source);
+                 OutputStream out = process.getOutputStream()) {
+                in.transferTo(out);
+            }
             runningJobs.get(record.id).process = process;
             int exit = process.waitFor();
             if (exit != 0) {
@@ -339,7 +364,7 @@ public class DbBackupServiceImpl implements IDbBackupService {
             record.finishedAt = LocalDateTime.now();
             updateRecord(record);
         } catch (Exception e) {
-            log.warn("恢复任务失败: {}", e.getMessage());
+            log.warn("恢复任务失败", e);
             record.status = "FAILED";
             record.errorMsg = e.getMessage();
             record.finishedAt = LocalDateTime.now();
@@ -464,6 +489,20 @@ public class DbBackupServiceImpl implements IDbBackupService {
         } catch (Exception e) {
             throw new ServiceException("备份目录不可用: " + e.getMessage());
         }
+    }
+
+    @Override
+    public Path resolveBackupFile(String filePath) {
+        if (StrUtil.isBlank(filePath)) {
+            throw new ServiceException("备份文件路径为空");
+        }
+        // 仅允许本服务备份目录内的文件, 防任意文件读取
+        Path backupRoot = ensureBackupDir().toAbsolutePath().normalize();
+        Path path = Paths.get(filePath).toAbsolutePath().normalize();
+        if (!path.startsWith(backupRoot) || !Files.isRegularFile(path)) {
+            throw new ServiceException("备份文件不存在或不在备份目录内");
+        }
+        return path;
     }
 
     /**

@@ -26,6 +26,9 @@
         <sa-token.version>1.38.0</sa-token.version>
         <redisson.version>3.27.2</redisson.version>
         <hutool.version>5.8.27</hutool.version>
+        <poi.version>5.2.5</poi.version>
+        <jsch.version>0.2.18</jsch.version>
+        <neo4j-driver.version>5.21.0</neo4j-driver.version>
     </properties>
 
     <dependencies>
@@ -87,14 +90,21 @@
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi-ooxml</artifactId>
-            <version>5.2.5</version>
+            <version>${poi.version}</version>
         </dependency>
 
         <!-- JSch：SSH 隧道 -->
         <dependency>
             <groupId>com.github.mwiede</groupId>
             <artifactId>jsch</artifactId>
-            <version>0.2.18</version>
+            <version>${jsch.version}</version>
+        </dependency>
+
+        <!-- Neo4j 官方 Java Driver（图数据库专用执行链路，Bolt 协议） -->
+        <dependency>
+            <groupId>org.neo4j.driver</groupId>
+            <artifactId>neo4j-java-driver</artifactId>
+            <version>${neo4j-driver.version}</version>
         </dependency>
 
         <!-- Lombok -->

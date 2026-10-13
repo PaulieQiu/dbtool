@@ -244,6 +244,11 @@
               <EsManager :conn-id="tab.connId" :conn-name="tab.connName" :read-only="isConnReadOnly(tab.connId)" />
             </div>
 
+            <!-- Neo4j 图数据库工作台 tab -->
+            <div v-else-if="tab.type === 'neo4j'" class="neo4j-tab">
+              <Neo4jWorkbench :conn-id="tab.connId" :conn-name="tab.connName" :read-only="isConnReadOnly(tab.connId)" />
+            </div>
+
             <!-- 表结构 tab -->
             <div v-else-if="tab.type === 'table'" class="table-tab">
               <div class="table-tab-header">
@@ -654,6 +659,7 @@ import DataCompareDialog from './DataCompareDialog.vue'
 import MonacoSqlEditor from './MonacoSqlEditor.vue'
 import RedisManager from './RedisManager.vue'
 import EsManager from './EsManager.vue'
+import Neo4jWorkbench from '../neo4j/Neo4jWorkbench.vue'
 import DataMigrateDialog from './DataMigrateDialog.vue'
 import ExcelImportDialog from './ExcelImportDialog.vue'
 import SqlLibraryDialog from './SqlLibraryDialog.vue'
@@ -984,6 +990,10 @@ function loadTreeNode(node, resolve) {
       resolve([{ id: 'note_' + node.data.id, label: '双击连接打开 Elasticsearch 可视化管理', isNote: true, isEsNote: true, connId: node.data.connId, leaf: true }])
       return
     }
+    if (node.data.dbType === 'NEO4J') {
+      resolve([{ id: 'note_' + node.data.id, label: '双击连接打开 Neo4j 图数据库工作台', isNote: true, isNeo4jNote: true, connId: node.data.connId, leaf: true }])
+      return
+    }
     listDatabases(node.data.connId)
       .then((res) => {
         resolve(
@@ -1059,6 +1069,11 @@ function handleTreeNodeDblClick(data) {
       openEsTab(data.connId, conn.connName)
       return
     }
+    if (conn && conn.dbType === 'NEO4J') {
+      // 双击 Neo4j 连接: 打开图数据库工作台
+      openNeo4jTab(data.connId, conn.connName)
+      return
+    }
     // 双击连接: 新建 SQL 脚本并绑定该连接
     openSqlTab(data.connId)
   } else if (data.isTable) {
@@ -1069,6 +1084,9 @@ function handleTreeNodeDblClick(data) {
   } else if (data.isEsNote) {
     const conn = connList.value.find((c) => c.id === data.connId)
     openEsTab(data.connId, conn ? conn.connName : 'Elasticsearch')
+  } else if (data.isNeo4jNote) {
+    const conn = connList.value.find((c) => c.id === data.connId)
+    openNeo4jTab(data.connId, conn ? conn.connName : 'Neo4j')
   }
 }
 
@@ -1112,11 +1130,29 @@ function openRedisTab(connId, connName) {
   activeTab.value = tab.key
 }
 
-function refreshTree() {
-  treeVersion.value++
+// ============ Neo4j 图数据库工作台 ============
+function openNeo4jTab(connId, connName) {
+  const exist = tabs.value.find((t) => t.type === 'neo4j' && t.connId === connId)
+  if (exist) {
+    activeTab.value = exist.key
+    return
+  }
+  const conn = connList.value.find((c) => c.id === connId)
+  const tab = reactive({
+    key: 'neo4j_' + connId,
+    type: 'neo4j',
+    title: (connName || conn.connName || 'Neo4j') + ' (图)',
+    connId,
+    connName: connName || (conn ? conn.connName : ''),
+    closable: true
+  })
+  tabs.value.push(tab)
+  activeTab.value = tab.key
 }
 
-// ============ 右侧多标签 ============
+function refreshTree() {
+  treeVersion.value++
+}// ============ 右侧多标签 ============
 function openTableTab(connId, schema, table, comment, tableType) {
   const exist = tabs.value.find((t) => t.type === 'table' && t.connId === connId && t.schema === schema && t.table === table)
   if (exist) {
@@ -1415,7 +1451,7 @@ function openSqlTab(preConnId, preSchema) {
     connId = sel.connId
     schema = sel.schema
   } else {
-    connId = connList.value.find((c) => c.dbType !== 'REDIS')?.id || connList.value[0]?.id
+    connId = connList.value.find((c) => c.dbType !== 'REDIS' && c.dbType !== 'NEO4J' && c.dbType !== 'ELASTICSEARCH')?.id || connList.value[0]?.id
   }
   const tab = reactive({
     key: 'sql_' + Date.now(),
@@ -3624,6 +3660,11 @@ function menuErView() {
 }
 /* Elasticsearch 管理 tab */
 .es-tab {
+  height: 100%;
+  min-height: 480px;
+}
+/* Neo4j 图数据库工作台 tab */
+.neo4j-tab {
   height: 100%;
   min-height: 480px;
 }

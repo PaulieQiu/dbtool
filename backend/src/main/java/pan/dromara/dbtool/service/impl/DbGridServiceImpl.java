@@ -1,5 +1,6 @@
 package pan.dromara.dbtool.service.impl;
 
+import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.core.DbConnectionManager;
 import pan.dromara.dbtool.domain.DbConn;
 import pan.dromara.dbtool.service.IDbGridService;
@@ -58,6 +59,10 @@ public class DbGridServiceImpl implements IDbGridService {
         int page = Math.max(pageNum, 1);
         int offset = (page - 1) * size;
         DbConn conn = metaService.getConn(connId);
+        // 只读连接强制只读语句校验, 与工作台主执行入口(DbMetaServiceImpl)保持一致, 防 with 前缀包裹写语句
+        if (DbAccessPolicy.isReadOnly(conn)) {
+            DbAccessPolicy.requireReadOnlyStatement(trimSql);
+        }
         String dialectName = conn.getDbType() == null ? "mysql" : conn.getDbType().toLowerCase();
 
         // 1) 取原始 SQL 列元数据(白名单来源), setMaxRows(1) 兼容各方言

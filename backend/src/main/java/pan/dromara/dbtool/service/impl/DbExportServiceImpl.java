@@ -40,7 +40,7 @@ public class DbExportServiceImpl implements IDbExportService {
     private static final int EXPORT_TIMEOUT_SECONDS = 300;
 
     private static final Pattern SELECT_START = Pattern.compile(
-        "^\\s*(select|show|describe|desc|explain|with)\\b", Pattern.CASE_INSENSITIVE);
+        "^\\s*(select|show|describe|desc|explain)\\b", Pattern.CASE_INSENSITIVE);
     /** 简单单表表名提取: FROM/INTO 后第一个标识符(支持反引号) */
     private static final Pattern TABLE_NAME = Pattern.compile(
         "(?:FROM|INTO|UPDATE|JOIN)\\s+(?:`([^`]+)`|([A-Za-z0-9_\\u4e00-\\u9fa5]+))(?:\\s|$)",

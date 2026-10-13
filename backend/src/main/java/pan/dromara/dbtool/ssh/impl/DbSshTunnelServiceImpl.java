@@ -11,6 +11,7 @@ import com.jcraft.jsch.Session;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
@@ -29,6 +30,10 @@ import java.util.concurrent.ConcurrentHashMap;
 public class DbSshTunnelServiceImpl implements SshTunnelService {
 
     private static final int SSH_CONNECT_TIMEOUT_MS = 10000;
+
+    /** 是否校验 SSH 主机密钥(默认 no 兼容既有隧道; 生产建议 yes/ask 并配置 known_hosts 防中间人) */
+    @Value("${dbtool.ssh.strictHostKeyChecking:no}")
+    private String strictHostKeyChecking = "no";
 
     private final DbConnMapper dbConnMapper;
 
@@ -60,7 +65,7 @@ public class DbSshTunnelServiceImpl implements SshTunnelService {
                 conn.getSshPort() == null ? 22 : conn.getSshPort());
             String sshPassword = conn.getSshPassword() == null ? "" : DbConnCrypto.decrypt(conn.getSshPassword());
             session.setPassword(StrUtil.nullToEmpty(sshPassword));
-            session.setConfig("StrictHostKeyChecking", "no");
+            session.setConfig("StrictHostKeyChecking", strictHostKeyChecking);
             session.setConfig("ConnectTimeout", String.valueOf(SSH_CONNECT_TIMEOUT_MS));
             session.connect(SSH_CONNECT_TIMEOUT_MS);
             // 本地端口 0 = 由操作系统分配空闲端口; 转发到数据库真实地址
