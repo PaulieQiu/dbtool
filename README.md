@@ -20,6 +20,7 @@
 | **备份恢复** | MySQL mysqldump 封装、任务列表、文件下载 |
 | **SQL 历史 / 脚本库** | 服务端化持久化，替代浏览器 localStorage |
 | **AI SQL 助手** | 自然语言转 SQL、SQL 解释（可对接任意 OpenAI 兼容网关） |
+| **Neo4j 图工作台** | Cypher 查询、节点/关系图形化展开、邻居节点扩散、图结果表格化展示 |
 
 ---
 
@@ -214,6 +215,21 @@ server {
 
 ---
 
-## 十、License
+## 十、更新记录
+
+| 日期 | Commit | 内容 |
+| --- | --- | --- |
+| 2026-10-13 | `8bce9ae` | **新增 Neo4j 图数据库能力**（Neo4jController / Neo4jService / Neo4jWorkbench.vue，Cypher 查询与节点-关系图可视化）；新增 AI SQL 服务 `AiSqlServiceImpl` 与 SQL LSP 服务 `SqlLspServiceImpl`；修复 Trae 多轮代码审查发现的连接管理 / 备份 / 导出 / 事务会话等问题；补充对应单元测试 |
+| 2026-10-12 | `c2c9c02` | 公开仓库 `application.yml` 密码改回占位符，避免本地凭证泄露 |
+| 2026-10-12 | `bab6133` | 修复雪花算法 Long ID 在前端 JS Number 精度丢失导致工作台 500（Jackson Long → String） |
+| 2026-10-12 | `6455f55` | 注册空 `v-hasPermi` 指令；移除 `conn/index.vue` 中未导入的 `getCurrentInstance()` 调用 |
+| 2026-10-12 | `857ff69` | 菜单顺序调整为：驱动管理 → 数据源管理 → 数据库工作台 |
+| 2026-10-12 | `651f7bc` | 对齐 `ag-grid-community` 与 `ag-grid-vue3` 版本到 36.1.0，修复空白页 |
+| 2026-10-12 | `e019235` | 独立运行版匿名登录过滤器 + 全部 `dbtool:*` 权限授予，绕开 Sa-Token 鉴权 |
+| 2026-10-12 | `b0b88ce` | 初始开源版本：从 RuoYi-Vue-Plus 抽取 `ruoyi-dbtool` 模块，配套轻量 shim，完成 README / LICENSE / SQL 脚本 |
+
+---
+
+## 十一、License
 
 MIT License，详见 [LICENSE](./LICENSE)。
