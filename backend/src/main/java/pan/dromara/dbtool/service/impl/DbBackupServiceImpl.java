@@ -1,5 +1,6 @@
 package pan.dromara.dbtool.service.impl;
 
+import pan.dromara.dbtool.backup.DbBackupStrategy;
 import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.core.DbConnCrypto;
 import pan.dromara.dbtool.core.DbOperationConfirmationService;
@@ -18,9 +19,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
-import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -54,6 +53,7 @@ public class DbBackupServiceImpl implements IDbBackupService {
 
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
 
+    private final java.util.List<DbBackupStrategy> backupStrategies;
     private final IDbMetaService metaService;
     private final DbOperationConfirmationService confirmationService;
     private final JdbcTemplate jdbcTemplate;
@@ -61,9 +61,6 @@ public class DbBackupServiceImpl implements IDbBackupService {
     /** 备份文件目录(默认 D:/project/dbtool_backups) */
     @Value("${dbtool.backup.dir:D:/project/dbtool_backups}")
     private String backupDir;
-    /** MySQL 客户端目录(默认探测本机 MySQL Server 8.0 安装) */
-    @Value("${dbtool.backup.mysqlHome:}")
-    private String mysqlHome;
     /** 备份文件保留天数(<=0 不按天清理) */
     @Value("${dbtool.backup.retentionDays:30}")
     private int retentionDays;
@@ -147,7 +144,7 @@ public class DbBackupServiceImpl implements IDbBackupService {
             throw new ServiceException("数据库名不合法: 不允许包含路径分隔符或 ..");
         }
         DbConn conn = metaService.getConn(connId);
-        requireMysql(conn);
+        DbBackupStrategy strategy = strategyFor(conn);
         if (isAnyRunning()) {
             throw new ServiceException("已有备份/恢复任务正在执行, 请等待完成后再提交");
         }
@@ -164,7 +161,7 @@ public class DbBackupServiceImpl implements IDbBackupService {
         insertRecord(record);
 
         Path targetDir = ensureBackupDir();
-        String fileName = schema + "_" + STAMP.format(LocalDateTime.now()) + ".sql";
+        String fileName = schema + "_" + STAMP.format(LocalDateTime.now()) + strategy.fileExt();
         Path target = targetDir.resolve(fileName);
         Future<?> future = executor.submit(() -> runDump(conn, schema, target, record));
         runningJobs.put(jobId, new JobHandle(future, null));
@@ -177,7 +174,7 @@ public class DbBackupServiceImpl implements IDbBackupService {
             throw new ServiceException("连接ID、目标数据库与备份文件不能为空");
         }
         DbConn conn = metaService.getConn(connId);
-        requireMysql(conn);
+        strategyFor(conn); // 校验该库类型支持备份/恢复
         DbAccessPolicy.requireWritable(conn);
         // 恢复会覆盖目标库数据, 属高危操作, 必须持有与目标匹配的一次性确认凭证
         String payload = "BACKUP_RESTORE:" + connId + ":" + schema + ":" + Paths.get(filePath).getFileName();
@@ -285,24 +282,16 @@ public class DbBackupServiceImpl implements IDbBackupService {
         updateRecord(record);
         Process process = null;
         try {
-            List<String> command = new ArrayList<>();
-            command.add(mysqlBin("mysqldump"));
-            command.add("--host=" + conn.getHost());
-            command.add("--port=" + (conn.getPort() == null ? "3306" : String.valueOf(conn.getPort())));
-            command.add("--user=" + conn.getUsername());
-            command.add("--single-transaction");
-            command.add("--routines");
-            command.add("--triggers");
-            command.add("--default-character-set=utf8mb4");
-            command.add("--result-file=" + target.toString());
-            command.add(schema);
-            process = runProcess(command, decrypt(conn.getPassword()));
+            DbBackupStrategy strategy = strategyFor(conn);
+            String password = decrypt(conn.getPassword());
+            List<String> command = strategy.buildDumpCommand(conn, schema, target, password);
+            process = runProcess(command, strategy.passwordEnvName(), password);
             runningJobs.get(record.id).process = process;
             int exit = process.waitFor();
             if (exit != 0) {
                 String stderr = readStderr(process);
                 record.status = "FAILED";
-                record.errorMsg = StrUtil.blankToDefault(stderr, "mysqldump 退出码 " + exit);
+                record.errorMsg = StrUtil.blankToDefault(stderr, "备份工具退出码 " + exit);
                 record.finishedAt = LocalDateTime.now();
                 updateRecord(record);
                 return;
@@ -335,17 +324,13 @@ public class DbBackupServiceImpl implements IDbBackupService {
         updateRecord(record);
         Process process = null;
         try {
-            List<String> command = new ArrayList<>();
-            command.add(mysqlBin("mysql"));
-            command.add("--host=" + conn.getHost());
-            command.add("--port=" + (conn.getPort() == null ? "3306" : String.valueOf(conn.getPort())));
-            command.add("--user=" + conn.getUsername());
-            command.add("--default-character-set=utf8mb4");
-            command.add(schema);
-            process = runProcess(command, decrypt(conn.getPassword()));
-            // 备份文件作为 stdin 输入(流式复制, 避免大文件整读入内存 OOM)
-            try (InputStream in = Files.newInputStream(source);
-                 OutputStream out = process.getOutputStream()) {
+            DbBackupStrategy strategy = strategyFor(conn);
+            String password = decrypt(conn.getPassword());
+            List<String> command = strategy.buildRestoreCommand(conn, schema, password);
+            process = runProcess(command, strategy.passwordEnvName(), password);
+            // 备份文件作为 stdin 输入(流式传输, 避免大文件 OOM)
+            try (java.io.OutputStream out = process.getOutputStream();
+                 java.io.InputStream in = Files.newInputStream(source)) {
                 in.transferTo(out);
             }
             runningJobs.get(record.id).process = process;
@@ -353,7 +338,7 @@ public class DbBackupServiceImpl implements IDbBackupService {
             if (exit != 0) {
                 String stderr = readStderr(process);
                 record.status = "FAILED";
-                record.errorMsg = StrUtil.blankToDefault(stderr, "mysql 导入退出码 " + exit);
+                record.errorMsg = StrUtil.blankToDefault(stderr, "恢复工具退出码 " + exit);
                 record.finishedAt = LocalDateTime.now();
                 updateRecord(record);
                 return;
@@ -440,10 +425,12 @@ public class DbBackupServiceImpl implements IDbBackupService {
         return view(mapRecord(rs));
     }
 
-    private Process runProcess(List<String> command, String password) throws Exception {
+    private Process runProcess(List<String> command, String passwordEnv, String password) throws Exception {
         ProcessBuilder builder = new ProcessBuilder(command);
-        // 密码走环境变量, 不进进程参数列表(避免 ps 可见明文)
-        builder.environment().put("MYSQL_PWD", StrUtil.nullToEmpty(password));
+        // 密码优先走环境变量, 不进进程参数列表(避免 ps 可见明文); 无对应 env 机制的策略自行处理
+        if (StrUtil.isNotBlank(passwordEnv)) {
+            builder.environment().put(passwordEnv, StrUtil.nullToEmpty(password));
+        }
         builder.redirectErrorStream(false);
         return builder.start();
     }
@@ -460,23 +447,6 @@ public class DbBackupServiceImpl implements IDbBackupService {
         } catch (Exception e) {
             return null;
         }
-    }
-
-    private String mysqlBin(String binary) {
-        // 自定义 mysqlHome 优先; 其次探测常见安装路径
-        if (StrUtil.isNotBlank(mysqlHome)) {
-            return Paths.get(mysqlHome, binary + ".exe").toString();
-        }
-        for (String candidate : new String[]{
-            "C:/Program Files/MySQL/MySQL Server 8.0/bin/" + binary + ".exe",
-            "C:/Program Files/MySQL/MySQL Server 5.7/bin/" + binary + ".exe",
-            "C:/Program Files/MySQL/MySQL Server 5.6/bin/" + binary + ".exe"}) {
-            if (Files.isRegularFile(Paths.get(candidate))) {
-                return candidate;
-            }
-        }
-        // 最后尝试 PATH 中的命令
-        return binary;
     }
 
     private Path ensureBackupDir() {
@@ -606,14 +576,17 @@ public class DbBackupServiceImpl implements IDbBackupService {
         }
     }
 
-    private void requireMysql(DbConn conn) {
+    private DbBackupStrategy strategyFor(DbConn conn) {
         if (conn == null) {
             throw new ServiceException("数据库连接不存在");
         }
-        String type = StrUtil.nullToEmpty(conn.getDbType()).toUpperCase();
-        if (!"MYSQL".equals(type) && !"MARIADB".equals(type)) {
-            throw new ServiceException("备份/恢复当前仅支持 MySQL/MariaDB 连接");
+        String type = conn.getDbType();
+        for (DbBackupStrategy s : backupStrategies) {
+            if (s.supports(type)) {
+                return s;
+            }
         }
+        throw new ServiceException("当前数据库类型(" + type + ")暂不支持备份/恢复, 支持: MySQL/MariaDB/PostgreSQL");
     }
 
     private boolean isAnyRunning() {

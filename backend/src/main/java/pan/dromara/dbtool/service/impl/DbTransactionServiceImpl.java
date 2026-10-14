@@ -1,5 +1,6 @@
 package pan.dromara.dbtool.service.impl;
 
+import pan.dromara.dbtool.config.DbToolProperties;
 import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.core.DbConnectionManager;
 import pan.dromara.dbtool.core.DbOperationConfirmationService;
@@ -42,8 +43,6 @@ public class DbTransactionServiceImpl implements IDbTransactionService {
 
     /** 事务内查询结果行数上限 */
     private static final int TXN_MAX_ROWS = 200;
-    /** 事务内语句超时(秒) */
-    private static final int TXN_TIMEOUT_SECONDS = 120;
 
     private static final Pattern SELECT_PATTERN = Pattern.compile(
         "^\\s*(select|show|describe|desc|explain|with)\\b", Pattern.CASE_INSENSITIVE);
@@ -52,15 +51,18 @@ public class DbTransactionServiceImpl implements IDbTransactionService {
     private final DbConnectionManager connectionManager;
     private final DbOperationConfirmationService confirmationService;
     private final IDbMetaService metaService;
+    private final DbToolProperties properties;
 
     public DbTransactionServiceImpl(DbTransactionSessionRegistry sessionRegistry,
                                     DbConnectionManager connectionManager,
                                     DbOperationConfirmationService confirmationService,
-                                    IDbMetaService metaService) {
+                                    IDbMetaService metaService,
+                                    DbToolProperties properties) {
         this.sessionRegistry = sessionRegistry;
         this.connectionManager = connectionManager;
         this.confirmationService = confirmationService;
         this.metaService = metaService;
+        this.properties = properties;
     }
 
     @Override
@@ -136,7 +138,7 @@ public class DbTransactionServiceImpl implements IDbTransactionService {
         DbResultVo result = new DbResultVo();
         Connection connection = session.getConnection();
         try (Statement stmt = connection.createStatement()) {
-            stmt.setQueryTimeout(TXN_TIMEOUT_SECONDS);
+            stmt.setQueryTimeout(properties.getTransactionTimeoutSeconds());
             if (SELECT_PATTERN.matcher(trimSql).find()) {
                 result.setSqlType("select");
                 List<Map<String, Object>> rows = new ArrayList<>();

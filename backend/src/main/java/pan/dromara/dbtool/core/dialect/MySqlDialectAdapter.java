@@ -29,7 +29,10 @@ public class MySqlDialectAdapter implements DbDialectAdapter {
         // 反引号/INFORMATION_SCHEMA/LIMIT 分页) 自 C.3.32 起归入本族(修正自 C.3.30 的 PG 误归)。
         return "mysql".equalsIgnoreCase(t) || "mariadb".equalsIgnoreCase(t)
             || "tidb".equalsIgnoreCase(t) || "doris".equalsIgnoreCase(t) || "starrocks".equalsIgnoreCase(t)
-            || "oceanbase".equalsIgnoreCase(t) || "gbase".equalsIgnoreCase(t);
+            || "oceanbase".equalsIgnoreCase(t) || "gbase".equalsIgnoreCase(t)
+            // C.3.35: Databend 兼容 MySQL 协议(反引号/INFORMATION_SCHEMA/LIMIT 分页), 归入本族;
+            // Manticore Search 支持 MySQL Wire 协议(端口 9306), 可用标准 MySQL 驱动连接, 亦归入本族
+            || "databend".equalsIgnoreCase(t) || "manticore".equalsIgnoreCase(t);
     }
 
     @Override

@@ -45,10 +45,24 @@ public class DbSshTunnelServiceImpl implements SshTunnelService {
         if (connId == null) {
             return null;
         }
+        // 已存在且连接正常: 直接复用
         TunnelHolder existing = tunnels.get(connId);
         if (existing != null && existing.session.isConnected()) {
             return existing.localPort;
         }
+        // 已存在但已断开: 移除旧引用(其 Session 已断开, 无需显式关闭), 避免 computeIfAbsent 复用过期句柄
+        if (existing != null) {
+            tunnels.remove(connId, existing);
+        }
+        // computeIfAbsent 原子保证: 同一 connId 并发请求只建立一次隧道,
+        // 后到线程复用先到结果, 避免并发建立覆盖 tunnels 引用导致先建 Session 泄漏
+        return tunnels.computeIfAbsent(connId, this::buildTunnel).localPort;
+    }
+
+    /**
+     * 建立隧道(由 computeIfAbsent 调用, 同一 connId 天然串行)
+     */
+    private TunnelHolder buildTunnel(Long connId) {
         DbConn conn = dbConnMapper.selectById(connId);
         if (conn == null) {
             throw new ServiceException("数据库连接不存在: " + connId);
@@ -71,10 +85,8 @@ public class DbSshTunnelServiceImpl implements SshTunnelService {
             // 本地端口 0 = 由操作系统分配空闲端口; 转发到数据库真实地址
             int localPort = session.setPortForwardingL(0, conn.getHost(),
                 conn.getPort() == null ? defaultPort(conn.getDbType()) : conn.getPort());
-            TunnelHolder holder = new TunnelHolder(session, localPort);
-            tunnels.put(connId, holder);
             log.info("SSH 隧道建立: connId={}, 本地 {} -> {}:{}", connId, localPort, conn.getHost(), conn.getPort());
-            return localPort;
+            return new TunnelHolder(session, localPort);
         } catch (Exception e) {
             throw new ServiceException("SSH 隧道建立失败(" + conn.getSshHost() + ":" + conn.getSshPort() + "): " + e.getMessage());
         }

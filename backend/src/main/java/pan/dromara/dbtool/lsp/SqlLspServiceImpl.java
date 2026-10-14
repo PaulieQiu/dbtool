@@ -11,6 +11,7 @@ import cn.hutool.core.util.StrUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -18,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -51,6 +53,18 @@ public class SqlLspServiceImpl implements SqlLspService {
         "AS", "ASC", "DESC", "COUNT(*)", "MAX", "MIN", "SUM", "AVG");
 
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+    /** 紧邻标识符的点号链(用于识别 schema.table) */
+    private static final Pattern DOTTED = Pattern.compile("(?:\\.[A-Za-z_][A-Za-z0-9_]*)+");
+    /** SQL 保留字(表名提取时过滤, 避免函数名/关键字误报为表) */
+    private static final Set<String> SQL_RESERVED = Set.of(
+        "select", "from", "where", "and", "or", "not", "in", "like", "between", "join", "inner",
+        "left", "right", "outer", "on", "as", "set", "values", "update", "delete", "insert", "into",
+        "table", "group", "by", "order", "having", "limit", "offset", "union", "all", "distinct",
+        "asc", "desc", "case", "when", "then", "else", "end", "exists", "is", "null", "true",
+        "false", "with", "dual");
+
+    /** 会话空闲超时(30 分钟无请求即清理, 防 stopSession 缺失导致的内存泄漏) */
+    private static final long SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000L;
 
     @Value("${dbtool.ai.allowConns:}")
     private String allowConns;
@@ -84,6 +98,26 @@ public class SqlLspServiceImpl implements SqlLspService {
     public void stopSession(String sessionId) {
         if (StrUtil.isNotBlank(sessionId) && sessions.remove(sessionId) != null) {
             log.info("SQL LSP 会话销毁: sessionId={}", sessionId);
+        }
+    }
+
+    /**
+     * 定时清理空闲超时会话(30 分钟无请求), 防 stopSession 缺失导致的内存泄漏。
+     * 需宿主启用 {@code @EnableScheduling} 时生效; 未启用时由显式 stopSession 释放, 不影响功能。
+     */
+    @Scheduled(fixedDelay = 300000, initialDelay = 300000)
+    public void sweepExpiredSessions() {
+        long now = System.currentTimeMillis();
+        int removed = 0;
+        for (LspSession s : sessions.values()) {
+            if (now - s.lastAccessTime > SESSION_IDLE_TIMEOUT_MS) {
+                if (sessions.remove(s.sessionId, s)) {
+                    removed++;
+                }
+            }
+        }
+        if (removed > 0) {
+            log.info("SQL LSP 过期会话清理: 共移除 {} 个(空闲超 {} 分钟)", removed, SESSION_IDLE_TIMEOUT_MS / 60000);
         }
     }
 
@@ -136,28 +170,44 @@ public class SqlLspServiceImpl implements SqlLspService {
         // 1) 关键字补全(含大小写敏感文本, 提供与输入匹配的关键字)
         for (String kw : KEYWORDS) {
             if (prefix.isEmpty() || kw.toLowerCase(Locale.ROOT).startsWith(prefix)) {
-                items.add(item(kw, "keyword", "SQL 关键字"));
+                if (!addLimited(items, item(kw, "keyword", "SQL 关键字"))) {
+                    return items;
+                }
             }
         }
         // 2) 表名补全
         for (String table : session.tables.keySet()) {
             if (prefix.isEmpty() || table.toLowerCase(Locale.ROOT).startsWith(prefix)) {
-                items.add(item(table, "table", "表"));
-            }
-        }
-        // 3) 列名补全(基于当前已识别的表)
-        String nearTable = detectNearTable(beforeCursor);
-        if (nearTable != null) {
-            for (String col : session.columnsOf(nearTable)) {
-                if (prefix.isEmpty() || col.toLowerCase(Locale.ROOT).startsWith(prefix)) {
-                    items.add(item(col, "column", "列 · " + nearTable));
+                if (!addLimited(items, item(table, "table", "表"))) {
+                    return items;
                 }
             }
         }
-        if (items.size() > 200) {
-            return items.subList(0, 200);
+        // 3) 列名补全: 仅当已有输入前缀时补列(空前缀下列全补易爆量且挤掉关键字/表名, 与主流 IDE 行为一致)
+        if (!prefix.isEmpty()) {
+            String nearTable = detectNearTable(beforeCursor);
+            if (nearTable != null) {
+                for (String col : session.columnsOf(nearTable)) {
+                    if (col.toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                        if (!addLimited(items, item(col, "column", "列 · " + nearTable))) {
+                            return items;
+                        }
+                    }
+                }
+            }
         }
         return items;
+    }
+
+    /**
+     * 追加补全项并受 200 上限约束; 达到上限返回 false 供调用方提前返回, 避免构造超量项
+     */
+    private static boolean addLimited(List<Map<String, Object>> items, Map<String, Object> it) {
+        if (items.size() >= 200) {
+            return false;
+        }
+        items.add(it);
+        return true;
     }
 
     // ================= hover =================
@@ -278,6 +328,7 @@ public class SqlLspServiceImpl implements SqlLspService {
         if (s == null) {
             throw new ServiceException("LSP 会话不存在或已过期，请重新 startSession");
         }
+        s.touch();
         return s;
     }
 
@@ -373,15 +424,35 @@ public class SqlLspServiceImpl implements SqlLspService {
 
     private List<String> extractTables(String sql) {
         List<String> out = new ArrayList<>();
-        Matcher m = Pattern.compile("(?:from|join|update|into|table)\\s+([`\"\\[\\w.]+)`?\"?\\[?",
-            Pattern.CASE_INSENSITIVE).matcher(sql);
+        Matcher m = Pattern.compile("(?:from|join|update|into|table)\\s+", Pattern.CASE_INSENSITIVE).matcher(sql);
         while (m.find()) {
-            String name = m.group(1).replace("`", "").replace("\"", "").replace("[", "").replace("]", "");
-            int dot = name.lastIndexOf('.');
-            if (dot >= 0) {
-                name = name.substring(dot + 1);
+            // 跳过子查询: FROM (SELECT ... / JOIN (SELECT ...
+            int p = m.end();
+            while (p < sql.length() && Character.isWhitespace(sql.charAt(p))) {
+                p++;
             }
-            if (!name.isEmpty() && !out.contains(name) && !"dual".equalsIgnoreCase(name)) {
+            if (p < sql.length() && sql.charAt(p) == '(') {
+                continue;
+            }
+            Matcher id = IDENTIFIER.matcher(sql.substring(m.end()));
+            if (!id.find()) {
+                continue;
+            }
+            String name = id.group();
+            // 支持 schema.table / db.schema.table: 抓取紧邻的点号链
+            Matcher dot = DOTTED.matcher(sql.substring(m.end() + id.end()));
+            if (dot.find() && dot.start() == id.end()) {
+                name += dot.group();
+            }
+            if (name.contains(".")) {
+                name = name.substring(name.lastIndexOf('.') + 1);
+            }
+            String lower = name.toLowerCase(Locale.ROOT);
+            // 过滤 SQL 保留字与 Oracle 伪表 dual, 避免函数名/关键字误报为表
+            if (SQL_RESERVED.contains(lower) || "dual".equalsIgnoreCase(name)) {
+                continue;
+            }
+            if (!out.contains(name)) {
                 out.add(name);
             }
         }
@@ -405,6 +476,8 @@ public class SqlLspServiceImpl implements SqlLspService {
         private final String sessionId;
         private final Long connId;
         private final String schema;
+        /** 最近访问时间(用于空闲会话清理) */
+        private volatile long lastAccessTime;
         /** 表名 -> DbTableVo(含注释与列) */
         private final Map<String, DbTableVo> tables = new LinkedHashMap<>();
         /** 表名 -> 列名列表 */
@@ -416,6 +489,12 @@ public class SqlLspServiceImpl implements SqlLspService {
             this.sessionId = sessionId;
             this.connId = connId;
             this.schema = schema;
+            this.lastAccessTime = System.currentTimeMillis();
+        }
+
+        /** 标记会话活跃(任何请求/访问时更新) */
+        void touch() {
+            this.lastAccessTime = System.currentTimeMillis();
         }
 
         List<String> columnsOf(String table) {

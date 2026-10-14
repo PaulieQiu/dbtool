@@ -130,6 +130,9 @@ public class DataTransferController {
         List<Map<String, Object>> sheets = new ArrayList<>();
         if (arr != null) {
             for (Object o : arr) {
+                if (!(o instanceof Map)) {
+                    throw new ServiceException("sheets 数组元素必须为对象(含 sheetName/tableName/mode)");
+                }
                 sheets.add((Map<String, Object>) o);
             }
         }

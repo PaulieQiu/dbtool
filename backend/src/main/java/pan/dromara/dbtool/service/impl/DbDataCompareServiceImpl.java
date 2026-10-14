@@ -1,5 +1,6 @@
 package pan.dromara.dbtool.service.impl;
 
+import pan.dromara.dbtool.config.DbToolProperties;
 import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.core.DbConnectionManager;
 import pan.dromara.dbtool.core.DbOperationConfirmationService;
@@ -40,15 +41,17 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class DbDataCompareServiceImpl implements IDbDataCompareService {
 
-    private static final int QUERY_TIMEOUT_SECONDS = 300;
     /** 单表比较行数上限(超出提示加 whereSql 缩小范围) */
     private static final long MAX_COMPARE_ROWS = 200000;
+    /** 比较数据预估内存上限(约 512MB), 累计超出提前终止, 防超大行/多列导致 OOM */
+    private static final long MAX_COMPARE_MEMORY_BYTES = 512L * 1024 * 1024;
     private static final int DEFAULT_BATCH_SIZE = 500;
     private static final Pattern SAFE_IDENTIFIER = Pattern.compile("^[A-Za-z0-9_\\u4e00-\\u9fa5]+$");
 
     private final DbConnectionManager connectionManager;
     private final IDbMetaService metaService;
     private final DbOperationConfirmationService confirmationService;
+    private final DbToolProperties properties;
 
     @Override
     public Map<String, Object> preview(Map<String, Object> params) {
@@ -199,9 +202,10 @@ public class DbDataCompareServiceImpl implements IDbDataCompareService {
         }
         try (Connection connection = connectionManager.getConnection(conn);
              Statement stmt = connection.createStatement()) {
-            stmt.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+            stmt.setQueryTimeout(properties.getCompareTimeoutSeconds());
             stmt.setFetchSize(1000);
             stmt.setMaxRows((int) Math.min(MAX_COMPARE_ROWS, Integer.MAX_VALUE));
+            long estimatedBytes = 0;
             try (ResultSet rs = stmt.executeQuery(sql.toString())) {
                 ResultSetMetaData meta = rs.getMetaData();
                 int colCount = meta.getColumnCount();
@@ -213,6 +217,8 @@ public class DbDataCompareServiceImpl implements IDbDataCompareService {
                         String column = meta.getColumnLabel(i);
                         Object value = rs.getObject(i);
                         String rendered = value == null ? "\u0000NULL" : String.valueOf(value);
+                        // 内存预估: 字符×2字节 + 每值固定开销, 累计超过上限提前终止防 OOM
+                        estimatedBytes += rendered.length() * 2L + 24;
                         if (request.keyColumns.contains(column)) {
                             key.append(rendered).append("\u0001");
                         }
@@ -222,6 +228,9 @@ public class DbDataCompareServiceImpl implements IDbDataCompareService {
                         values.add(value);
                     }
                     rows.put(key.toString(), new RowEntry(request.keyColumns, values, key.toString(), fingerprint.toString()));
+                    if (estimatedBytes > MAX_COMPARE_MEMORY_BYTES) {
+                        throw new ServiceException("比较数据量过大(预估内存超过 512MB), 请添加 whereSql 缩小范围后重试");
+                    }
                 }
             }
             if (rows.size() >= MAX_COMPARE_ROWS) {

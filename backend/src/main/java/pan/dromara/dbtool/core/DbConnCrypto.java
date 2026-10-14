@@ -2,6 +2,8 @@ package pan.dromara.dbtool.core;
 
 import cn.hutool.crypto.SecureUtil;
 import cn.hutool.crypto.symmetric.AES;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 数据库连接密码 加解密工具
@@ -12,6 +14,8 @@ import cn.hutool.crypto.symmetric.AES;
  * @author doubao
  */
 public class DbConnCrypto {
+
+    private static final Logger log = LoggerFactory.getLogger(DbConnCrypto.class);
 
     /**
      * AES 密钥: 外部化覆盖或回退默认(16字节)
@@ -61,7 +65,8 @@ public class DbConnCrypto {
         try {
             return AES.decryptStr(cipher);
         } catch (Exception e) {
-            // 解密失败说明可能是明文, 原样返回
+            // 解密失败说明可能是明文或密钥变更: 原样返回以便兼容, 但需告警便于排查
+            log.warn("连接密码解密失败(可能为明文或 AES 密钥已变更), 原样返回: {}", e.getMessage());
             return cipher;
         }
     }

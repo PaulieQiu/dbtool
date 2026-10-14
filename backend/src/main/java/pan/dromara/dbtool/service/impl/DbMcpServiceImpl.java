@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * MCP Server 实现(P5): 工具集只读、白名单连接、逐项审计
@@ -32,6 +33,8 @@ public class DbMcpServiceImpl implements IDbMcpService {
 
     private static final String PROTOCOL_VERSION = "2025-03-26";
     private static final int QUERY_ROW_LIMIT = 100;
+    /** LIMIT 子句判定(剥离字符串字面量后使用) */
+    private static final Pattern LIMIT_PATTERN = Pattern.compile("\\blimit\\b", Pattern.CASE_INSENSITIVE);
 
     private final IDbMetaService metaService;
     private final DbAiAssistServiceImpl aiAssistService;
@@ -191,10 +194,37 @@ public class DbMcpServiceImpl implements IDbMcpService {
     // ================= 辅助 =================
 
     private String ensureLimit(String sql) {
-        if (sql.toLowerCase().contains("select") && !sql.toLowerCase().contains("limit")) {
+        // 剥离字符串字面量后判断是否已有 LIMIT 子句, 避免 where name='limit' 等字面量误判为已有 LIMIT
+        String stripped = stripQuoted(sql);
+        if (stripped.toLowerCase().contains("select") && !LIMIT_PATTERN.matcher(stripped).find()) {
             return sql + " LIMIT " + QUERY_ROW_LIMIT;
         }
         return sql;
+    }
+
+    /** 把单/双引号字符串字面量内容替换为等长空格, 保留其余 SQL(用于排除字面量内关键字的干扰) */
+    private static String stripQuoted(String s) {
+        StringBuilder sb = new StringBuilder(s.length());
+        char quote = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (quote == 0 && (c == '\'' || c == '"')) {
+                quote = c;
+                sb.append(' ');
+            } else if (quote != 0 && c == '\\' && i + 1 < s.length()) {
+                // 转义字符: 跳过一个(内容仍算字符串内)
+                sb.append("  ");
+                i++;
+            } else if (quote != 0 && c == quote) {
+                quote = 0;
+                sb.append(' ');
+            } else if (quote != 0) {
+                sb.append(' ');
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     private void requireSchema(String schema) {

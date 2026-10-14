@@ -10,6 +10,7 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -39,7 +40,8 @@ public class DbDriverManager {
     /**
      * 驱动存放目录
      */
-    public static final String DRIVER_DIR = System.getProperty("user.dir") + File.separator + "driver";
+    public static final String DRIVER_DIR = System.getProperty("dbtool.driver.dir",
+        System.getProperty("user.dir") + File.separator + "driver");
 
     /**
      * 外部驱动 ClassLoader 缓存 (dbType -> loader)
@@ -89,6 +91,10 @@ public class DbDriverManager {
             throw new IllegalArgumentException("数据库类型不存在或未配置 Maven 坐标: " + dbType);
         }
         String ver = StrUtil.blankToDefault(version, info.getDefaultVersion());
+        // 版本号白名单校验, 防注入 ../ 等路径字符构造非预期下载地址(SSRF/路径穿越)
+        if (!ver.matches("[A-Za-z0-9._\\-]+")) {
+            throw new IllegalArgumentException("驱动版本号非法(仅允许字母数字 ._-): " + ver);
+        }
         String url = mavenUrl(info.getArtifact(), ver);
         File dir = getDriverDir();
         String jarName = (info.getCode() + "-" + ver + ".jar").toLowerCase();
@@ -189,6 +195,11 @@ public class DbDriverManager {
         if (info == null) {
             return false;
         }
+        // 原生协议类型(REST/RESP/Bolt 等): 无 JDBC 驱动, 直接可用
+        if (StrUtil.isBlank(info.getDriverClass())
+            && (StrUtil.isBlank(info.getUrlTemplate()) || !info.getUrlTemplate().trim().startsWith("jdbc:"))) {
+            return true;
+        }
         // 内置驱动(已打入应用 jar)直接可用
         if (Boolean.TRUE.equals(info.getBuiltin())) {
             try {
@@ -208,19 +219,46 @@ public class DbDriverManager {
             }
             try {
                 URLClassLoader loader = buildLoader(key);
-                Class<?> cls = loader.loadClass(info.getDriverClass());
+                // driverClass 已知直接用; 未知则从上传 jar 的 JDBC 服务声明自动发现(支持厂商私有驱动)
+                Class<?> cls = StrUtil.isNotBlank(info.getDriverClass())
+                    ? loader.loadClass(info.getDriverClass())
+                    : discoverDriverClass(loader);
                 Driver driver = (Driver) cls.getDeclaredConstructor().newInstance();
                 // 注册到 DriverManager(该驱动由我们的 loader 加载, DriverManager 可代理)
                 DriverManager.registerDriver(new DriverShim(driver));
                 loaderCache.put(key, loader);
                 registered.put(key, true);
-                log.info("外部驱动加载成功: {} -> {}", key, info.getDriverClass());
+                log.info("外部驱动加载成功: {} -> {}", key, cls.getName());
                 return true;
             } catch (Exception e) {
                 log.warn("外部驱动加载失败 {}: {}", key, e.getMessage());
                 return false;
             }
         }
+    }
+
+    /**
+     * 从上传的驱动 jar 自动发现 JDBC 驱动类(META-INF/services/java.sql.Driver),
+     * 用于 driverClass 未知的厂商私有驱动类型(transwarp/goldendb/kwdb/sundb 等),
+     * 使用户上传驱动 jar 后无需在类型注册中硬编码驱动类名即可连接。
+     */
+    private static Class<?> discoverDriverClass(URLClassLoader loader) throws Exception {
+        try (InputStream in = loader.getResourceAsStream("META-INF/services/java.sql.Driver")) {
+            if (in != null) {
+                String content = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                for (String line : content.split("\\r?\\n")) {
+                    String cls = line.trim();
+                    if (cls.isEmpty() || cls.startsWith("#")) {
+                        continue;
+                    }
+                    try {
+                        return loader.loadClass(cls);
+                    } catch (ClassNotFoundException ignored) {
+                    }
+                }
+            }
+        }
+        throw new IllegalStateException("驱动 jar 未声明 META-INF/services/java.sql.Driver, 请上传含 JDBC 服务声明的驱动 jar");
     }
 
     /**
@@ -239,9 +277,12 @@ public class DbDriverManager {
         if (Boolean.TRUE.equals(info.getBuiltin())) {
             return true;
         }
-        // driverClass 为空的类型(REST/RESP 原生协议)视为就绪
+        // driverClass 为空: 非 JDBC 原生协议类型(REST/RESP/Bolt)视为就绪;
+        // JDBC 类型(有 jdbc: url)driverClass 未知时, 就绪与否取决于外部 jar 是否已上传注册
         if (StrUtil.isBlank(info.getDriverClass())) {
-            return true;
+            boolean jdbc = StrUtil.isNotBlank(info.getUrlTemplate())
+                && info.getUrlTemplate().trim().startsWith("jdbc:");
+            return !jdbc || Boolean.TRUE.equals(registered.get(key));
         }
         return Boolean.TRUE.equals(registered.get(key));
     }

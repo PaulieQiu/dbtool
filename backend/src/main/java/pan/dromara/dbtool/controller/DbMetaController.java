@@ -199,7 +199,7 @@ public class DbMetaController {
     @Log(title = "数据库管理", businessType = BusinessType.INSERT)
     @PostMapping("/createDatabase")
     public R<Void> createDatabase(@RequestBody Map<String, String> body) {
-        metaService.createDatabase(Long.valueOf(body.get("connId")), body.get("dbName"), body.get("charset"));
+        metaService.createDatabase(reqConnId(body), body.get("dbName"), body.get("charset"));
         return R.ok();
     }
 
@@ -222,7 +222,7 @@ public class DbMetaController {
     @Log(title = "数据库管理", businessType = BusinessType.UPDATE)
     @PostMapping("/renameTable")
     public R<Void> renameTable(@RequestBody Map<String, String> body) {
-        metaService.renameTable(Long.valueOf(body.get("connId")), body.get("schema"), body.get("oldName"), body.get("newName"));
+        metaService.renameTable(reqConnId(body), body.get("schema"), body.get("oldName"), body.get("newName"));
         return R.ok();
     }
 
@@ -233,7 +233,7 @@ public class DbMetaController {
     @Log(title = "数据库管理", businessType = BusinessType.UPDATE)
     @PostMapping("/addColumn")
     public R<Void> addColumn(@RequestBody Map<String, Object> body) {
-        Long connId = Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = reqConnId(body);
         String schema = (String) body.get("schema");
         String table = (String) body.get("table");
         DbColumnVo column = new DbColumnVo();
@@ -272,7 +272,7 @@ public class DbMetaController {
     @Log(title = "数据库管理", businessType = BusinessType.UPDATE)
     @PostMapping("/modifyColumn")
     public R<Void> modifyColumn(@RequestBody Map<String, Object> body) {
-        Long connId = Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = reqConnId(body);
         String schema = (String) body.get("schema");
         String table = (String) body.get("table");
         String oldColumnName = (String) body.get("oldColumnName");
@@ -296,7 +296,7 @@ public class DbMetaController {
     @Log(title = "数据库管理", businessType = BusinessType.OTHER)
     @PostMapping("/executeDdl")
     public R<Void> executeDdl(@RequestBody Map<String, String> body) {
-        metaService.executeDdl(Long.valueOf(body.get("connId")), body.get("sql"));
+        metaService.executeDdl(reqConnId(body), body.get("sql"));
         return R.ok();
     }
 
@@ -306,10 +306,10 @@ public class DbMetaController {
     @SaCheckPermission("dbtool:meta:list")
     @PostMapping("/query")
     public R<DbResultVo> query(@RequestBody Map<String, Object> body) {
-        Long connId = Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = reqConnId(body);
         String sql = (String) body.get("sql");
-        Integer pageNum = body.get("pageNum") == null ? 1 : Integer.valueOf(String.valueOf(body.get("pageNum")));
-        Integer pageSize = body.get("pageSize") == null ? 100 : Integer.valueOf(String.valueOf(body.get("pageSize")));
+        Integer pageNum = reqInt(body.get("pageNum"), 1);
+        Integer pageSize = reqInt(body.get("pageSize"), 100);
         return R.ok(metaService.query(connId, sql, pageNum, pageSize));
     }
 
@@ -320,7 +320,7 @@ public class DbMetaController {
     @Log(title = "数据库工作台", businessType = BusinessType.OTHER)
     @PostMapping("/execute")
     public R<DbResultVo> execute(@RequestBody Map<String, Object> body) {
-        Long connId = Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = reqConnId(body);
         String sql = (String) body.get("sql");
         if (!DbAccessPolicy.isReadOnlyStatement(sql) && !StpUtil.hasPermission("dbtool:meta:edit")) {
             throw new NotPermissionException("执行写入 SQL 需要 dbtool:meta:edit 权限");
@@ -359,5 +359,30 @@ public class DbMetaController {
     @PostMapping("/grid-changes/commit")
     public R<Integer> commitGridChanges(@RequestBody DbGridChangeCommitBo body) {
         return R.ok(metaService.commitGridChanges(body.getChanges(), body.getConfirmationToken(), StpUtil.getLoginIdAsString()));
+    }
+
+    /** 安全解析请求体中的 connId: 缺失或格式非法抛中文 ServiceException(避免 NumberFormatException 500) */
+    private static Long reqConnId(Map<String, ?> body) {
+        Object v = body == null ? null : body.get("connId");
+        if (v == null || String.valueOf(v).trim().isEmpty()) {
+            throw new ServiceException("connId 不能为空");
+        }
+        try {
+            return Long.valueOf(String.valueOf(v).trim());
+        } catch (NumberFormatException e) {
+            throw new ServiceException("connId 参数格式不正确: " + v);
+        }
+    }
+
+    /** 安全解析 int 参数: 缺失/空返回默认值; 格式非法抛中文 ServiceException */
+    private static Integer reqInt(Object v, int def) {
+        if (v == null || String.valueOf(v).trim().isEmpty()) {
+            return def;
+        }
+        try {
+            return Integer.valueOf(String.valueOf(v).trim());
+        } catch (NumberFormatException e) {
+            throw new ServiceException("分页参数格式不正确: " + v);
+        }
     }
 }

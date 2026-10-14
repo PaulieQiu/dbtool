@@ -31,6 +31,22 @@ public class DbTypeRegistry {
             "org.postgresql.Driver", "org.postgresql:postgresql", "42.7.3",
             List.of("42.7.3", "42.7.2", "42.6.0", "42.5.4"),
             "jdbc:postgresql://{host}:{port}/{db}", true));
+        reg(new DbTypeInfo("OPENGUSS", "openGauss", "SQL", false, "opengauss", 5432,
+            "org.opengauss.Driver", "org.opengauss:opengauss-jdbc", "6.0.5",
+            List.of("6.0.5", "6.0.1", "5.0.1", "3.1.1"),
+            "jdbc:opengauss://{host}:{port}/{db}", false));
+        reg(new DbTypeInfo("GAUSSDB", "GaussDB(华为)", "SQL", false, "gaussdb", 5432,
+            "org.opengauss.Driver", "org.opengauss:opengauss-jdbc", "6.0.5",
+            List.of("6.0.5", "6.0.1", "5.0.1", "3.1.1"),
+            "jdbc:opengauss://{host}:{port}/{db}", false));
+        reg(new DbTypeInfo("VASTBASE", "Vastbase(海量)", "SQL", false, "vastbase", 5432,
+            "org.opengauss.Driver", "org.opengauss:opengauss-jdbc", "6.0.5",
+            List.of("6.0.5", "6.0.1", "5.0.1", "3.1.1"),
+            "jdbc:opengauss://{host}:{port}/{db}", false));
+        reg(new DbTypeInfo("XUGU", "虚谷 XUGU", "SQL", false, "xugu", 5130,
+            "com.xugudb.jdbc.Driver", "com.xugudb:xugu-jdbc", "12.3.4",
+            List.of("12.3.4"),
+            "jdbc:xugu://{host}:{port}/{db}", false));
         reg(new DbTypeInfo("MARIADB", "MariaDB", "SQL", false, "mariadb", 3306,
             "org.mariadb.jdbc.Driver", "org.mariadb.jdbc:mariadb-java-client", "3.3.3",
             List.of("3.3.3", "3.2.0", "3.1.4", "2.7.11"),
@@ -192,6 +208,36 @@ public class DbTypeRegistry {
             "com.mysql.cj.jdbc.Driver", "com.mysql:mysql-connector-j", "8.0.33",
             List.of("8.0.33"),
             "jdbc:mysql://{host}:{port}/{db}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true", true));
+        reg(new DbTypeInfo("DATABEND", "Databend", "分析型", false, "databend", 8000,
+            "com.databend.jdbc.DatabendDriver", "com.databend:databend-jdbc", "0.4.8",
+            List.of("0.4.8", "0.4.6", "0.4.0"),
+            "jdbc:databend://{host}:{port}/{db}", false));
+        reg(new DbTypeInfo("QUESTDB", "QuestDB", "分析型", false, "questdb", 8812,
+            "org.postgresql.Driver", "org.postgresql:postgresql", "42.7.3",
+            List.of("42.7.3", "42.7.2", "42.6.0", "42.5.4"),
+            "jdbc:postgresql://{host}:{port}/qdb", false));
+        reg(new DbTypeInfo("MANTICORE", "Manticore Search", "分析型", false, "manticore", 9306,
+            "com.mysql.cj.jdbc.Driver", "com.mysql:mysql-connector-j", "8.0.33",
+            List.of("8.0.33"),
+            "jdbc:mysql://{host}:{port}/", false));
+        reg(new DbTypeInfo("IRIS", "InterSystems IRIS", "SQL", false, "iris", 1972,
+            "com.intersystems.jdbc.IRISDriver", "com.intersystems:intersystems-jdbc", "2018.1.2.609.0",
+            List.of("2018.1.2.609.0"),
+            "jdbc:IRIS://{host}:{port}/{db}", false));
+        // C.3.35 厂商私有驱动类型(无 Central 坐标): driverClass/artifact 留空,
+        // 用户经「驱动管理」上传驱动 jar 后, ensureDriver 自动发现 JDBC 服务声明即可连接; 端口/URL 待实测确认
+        reg(new DbTypeInfo("TRANSARP", "Transwarp(星环)", "大数据", false, "transwarp", 20000,
+            null, null, "custom", List.of("custom"),
+            "jdbc:transwarp://{host}:{port}/{db}", false));
+        reg(new DbTypeInfo("GOLDENDB", "Goldendb(中兴)", "分析型", false, "goldendb", 3306,
+            null, null, "custom", List.of("custom"),
+            "jdbc:goldendb://{host}:{port}/{db}", false));
+        reg(new DbTypeInfo("KWDB", "KDB(金沃)", "SQL", false, "kwdb", 1521,
+            null, null, "custom", List.of("custom"),
+            "jdbc:kwdb://{host}:{port}/{db}", false));
+        reg(new DbTypeInfo("SUNDB", "SunDB(太阳)", "SQL", false, "sundb", 5432,
+            null, null, "custom", List.of("custom"),
+            "jdbc:sundb://{host}:{port}/{db}", false));
         reg(new DbTypeInfo("DUCKDB", "DuckDB", "分析型", false, "duckdb", 0,
             "org.duckdb.DuckDBDriver", "org.duckdb:duckdb_jdbc", "1.0.0",
             List.of("1.0.0", "0.10.2"),
@@ -274,17 +320,20 @@ public class DbTypeRegistry {
      */
     private static final Set<String> DIALECT_ADAPTED = Set.of(
         // MySQL 协议兼容族
-        "MYSQL", "MARIADB", "TIDB", "DORIS", "STARROCKS", "OCEANBASE",
+        "MYSQL", "MARIADB", "TIDB", "DORIS", "STARROCKS", "OCEANBASE", "DATABEND", "MANTICORE",
         // PostgreSQL 协议兼容族(C.3.30: 国产 PG + 衍生/云)
         "POSTGRESQL", "KINGBASE", "HIGHGO", "HIGRES", "GBASE", "GREENPLUM",
         "EDB", "COCKROACHDB", "YUGABYTEDB", "TIMESCALEDB", "REDSHIFT",
+        "OPENGUSS", "XUGU", "QUESTDB", "GAUSSDB", "VASTBASE",
         "ORACLE", "SQLSERVER", "DAMENG",
         // C.3.30 新增独立适配器
         "CLICKHOUSE", "SQLITE", "H2", "DUCKDB",
         // C.3.32 新增独立适配器 + GBase 8a 归 MySQL 族
         "VERTICA", "EXASOL", "FIREBIRD",
         // C.3.34 新增独立适配器 + Azure SQL 归 SqlServer 族
-        "AZURESQL", "HSQLDB", "DB2"
+        "AZURESQL", "HSQLDB", "DB2",
+        // C.3.35 新增独立适配器(对照 dbx informix/access yaml)
+        "INFORMIX", "MSACCESS"
     );
 
     /**
@@ -330,14 +379,15 @@ public class DbTypeRegistry {
             return caps;
         }
         DbTypeInfo info = REGISTRY.get(c);
-        if (info == null || !"SQL".equals(info.getCategory())) {
-            return caps;
-        }
-        caps.add("query");
+        // 有方言适配器(DIALECT_ADAPTED)的类型, 不论 SQL/分析型等分类, 均可浏览/DDL/方言查询;
+        // 仅无方言适配器的 SQL 类额外提供基础查询; 非 SQL 且无方言的类型保持仅 connect。
         if (DIALECT_ADAPTED.contains(c)) {
+            caps.add("query");
             caps.add("browse");
             caps.add("ddl");
             caps.add("dialect");
+        } else if (info != null && "SQL".equals(info.getCategory())) {
+            caps.add("query");
         }
         if (VERIFIED.contains(c)) {
             caps.add("verified");

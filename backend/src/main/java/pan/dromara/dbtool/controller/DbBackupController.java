@@ -7,8 +7,9 @@ import pan.dromara.dbtool.service.IDbMetaService;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.stp.StpUtil;
+import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.R;
-import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -21,7 +22,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -32,6 +32,7 @@ import java.util.Map;
  *
  * @author doubao
  */
+@Slf4j
 @RestController
 @RequestMapping("/dbtool/backup")
 public class DbBackupController {
@@ -118,9 +119,12 @@ public class DbBackupController {
             return ResponseEntity.ok()
                 .headers(headers)
                 .contentLength(file.length())
-                .body(new InputStreamResource(new FileInputStream(file)));
+                // FileSystemResource 由 Spring MVC 按需打开并按响应生命周期关闭, 避免 InputStreamResource 需手动管理流
+                .body(new FileSystemResource(file));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body("文件读取失败: " + e.getMessage());
+            // 完整堆栈入服务端日志, 响应不泄露服务器文件系统路径
+            log.error("备份文件下载失败: id={}", id, e);
+            return ResponseEntity.internalServerError().body("文件读取失败, 请查看服务端日志");
         }
     }
 }

@@ -3,12 +3,15 @@ package pan.dromara.dbtool.service.impl;
 import pan.dromara.dbtool.core.DbConnCrypto;
 import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.core.DbConnectionManager;
+import pan.dromara.dbtool.core.DbMetaCache;
 import pan.dromara.dbtool.core.DbGridChangePlanner;
 import pan.dromara.dbtool.core.DbOperationConfirmationService;
 import pan.dromara.dbtool.core.DbQueryExecutionRegistry;
 import pan.dromara.dbtool.core.DbStructureChangeConfirmation;
 import pan.dromara.dbtool.core.dialect.ClickHouseDialectAdapter;
+import pan.dromara.dbtool.config.DbToolProperties;
 import pan.dromara.dbtool.core.dialect.DbDialectAdapter;
+import pan.dromara.dbtool.core.dialect.DbDialectRegistry;
 import pan.dromara.dbtool.core.dialect.Db2DialectAdapter;
 import pan.dromara.dbtool.core.dialect.HsqlDialectAdapter;
 import pan.dromara.dbtool.core.dialect.NullDialectAdapter;
@@ -61,6 +64,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 数据库元数据 服务实现
@@ -77,8 +81,11 @@ public class DbMetaServiceImpl implements IDbMetaService {
     private final DbConnectionManager connectionManager;
     private final DbOperationConfirmationService confirmationService;
     private final DbQueryExecutionRegistry queryExecutionRegistry;
-
-    private static final int QUERY_TIMEOUT_SECONDS = 120;
+    private final DbRedisMetaSupport redisMetaSupport;
+    private final DbEsMetaSupport esMetaSupport;
+    private final DbDialectRegistry dialectRegistry;
+    private final DbToolProperties properties;
+    private final DbMetaCache metaCache;
 
     /**
      * 系统库过滤
@@ -107,29 +114,8 @@ public class DbMetaServiceImpl implements IDbMetaService {
     private static final int REDIS_DB_COUNT = 16;
 
     /**
-     * 方言适配器注册表(优先匹配, 默认 MySQL)
-     */
-    private static final List<DbDialectAdapter> DIALECTS = List.of(
-        new DmDialectAdapter(),
-        new SqlServerDialectAdapter(),
-        new OracleDialectAdapter(),
-        new ClickHouseDialectAdapter(),
-        new SqliteDialectAdapter(),
-        new H2DialectAdapter(),
-        new DuckDbDialectAdapter(),
-        new VerticaDialectAdapter(),
-        new ExasolDialectAdapter(),
-        new FirebirdDialectAdapter(),
-        new Db2DialectAdapter(),
-        new HsqlDialectAdapter(),
-        new PostgreSqlDialectAdapter(),
-        new MySqlDialectAdapter()
-    );
-
-    /** 未适配方言的统一降级实例 */
-    private static final DbDialectAdapter NULL_DIALECT = new NullDialectAdapter();
-
-    /** 支持切换当前库(catalog)的类型: MySQL 协议族 + SQLServer; 其余方言暂不切库(与既有行为一致) */
+     * 方言解析已抽取到共享组件 DbDialectRegistry(含注册表、缓存与 paginate), 此处不再持有私有注册表
+     */    /** 支持切换当前库(catalog)的类型: MySQL 协议族 + SQLServer; 其余方言暂不切库(与既有行为一致) */
     private static final Set<String> CATALOG_SWITCH_TYPES = Set.of(
         "MYSQL", "MARIADB", "TIDB", "DORIS", "STARROCKS", "OCEANBASE", "GBASE", "SQLSERVER");
 
@@ -159,14 +145,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
      * 按连接数据库类型选择方言适配器(忽略大小写, 未命中回退 MySQL 保持历史行为)
      */
     private DbDialectAdapter dialect(DbConn conn) {
-        String t = conn == null ? null : conn.getDbType();
-        for (DbDialectAdapter a : DIALECTS) {
-            if (a.supports(t)) {
-                return a;
-            }
-        }
-        // 未适配方言的类型不再回退 MySQL(避免错误方言 SQL), 由上层对 null 做安全降级/明确报错
-        return NULL_DIALECT;
+        return dialectRegistry.dialect(conn == null ? null : conn.getDbType());
     }
 
     /**
@@ -201,33 +180,6 @@ public class DbMetaServiceImpl implements IDbMetaService {
         return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20");
     }
 
-    /**
-     * 递归收集 ES 字段(object/nested 类型展开为 父.子)
-     */
-    private void collectEsFields(cn.hutool.json.JSONObject properties, String prefix, List<DbColumnVo> list) {
-        for (String field : properties.keySet()) {
-            cn.hutool.json.JSONObject prop = properties.getJSONObject(field);
-            if (prop == null) {
-                continue;
-            }
-            String name = prefix.isEmpty() ? field : prefix + "." + field;
-            String type = prop.getStr("type", "object");
-            DbColumnVo vo = new DbColumnVo();
-            vo.setColumnName(name);
-            vo.setDataType(type);
-            vo.setColumnType(type);
-            cn.hutool.json.JSONObject subFields = prop.getJSONObject("fields");
-            vo.setColumnComment(subFields != null && !subFields.isEmpty() ? "多字段:" + subFields.keySet() : "");
-            list.add(vo);
-            if ("object".equals(type) || "nested".equals(type)) {
-                cn.hutool.json.JSONObject sub = prop.getJSONObject("properties");
-                if (sub != null) {
-                    collectEsFields(sub, name, list);
-                }
-            }
-        }
-    }
-
     @Override
     public DbConn getConn(Long connId) {
         DbConn conn = dbConnMapper.selectById(connId);
@@ -239,107 +191,111 @@ public class DbMetaServiceImpl implements IDbMetaService {
 
     @Override
     public List<String> databases(Long connId) {
-        DbConn conn = getConn(connId);
-        // Redis: 返回 0-15 逻辑库
-        if (isRedis(conn)) {
-            List<String> dbs = new ArrayList<>();
-            for (int i = 0; i < REDIS_DB_COUNT; i++) {
-                dbs.add(String.valueOf(i));
-            }
-            return dbs;
-        }
-        // Elasticsearch: 无 schema 概念, 返回虚拟库(表=索引)
-        if ("ELASTICSEARCH".equalsIgnoreCase(conn.getDbType())) {
-            return List.of("default");
-        }
-        String dbSql = dialect(conn).databasesSql();
-        if (dbSql == null) {
-            throw new ServiceException("当前数据库类型(" + conn.getDbType() + ")未适配元数据浏览, 仅支持连接与基础 SQL 查询");
-        }
-        List<String> list = new ArrayList<>();
-        try (Connection connection = connectionManager.getConnection(conn);
-             Statement stmt = connection.createStatement();
-             ResultSet rs = stmt.executeQuery(dbSql)) {
-            while (rs.next()) {
-                String name = rs.getString(1);
-                if (!SYS_SCHEMAS.contains(name)) {
-                    list.add(name);
+        return metaCache.get(connId, "databases", "", () -> {
+            DbConn conn = getConn(connId);
+            // Redis: 返回 0-15 逻辑库
+            if (isRedis(conn)) {
+                List<String> dbs = new ArrayList<>();
+                for (int i = 0; i < REDIS_DB_COUNT; i++) {
+                    dbs.add(String.valueOf(i));
                 }
+                return dbs;
             }
-        } catch (Exception e) {
-            throw new ServiceException("查询数据库列表失败: " + e.getMessage());
-        }
-        return list;
+            // Elasticsearch: 无 schema 概念, 返回虚拟库(表=索引)
+            if ("ELASTICSEARCH".equalsIgnoreCase(conn.getDbType())) {
+                return List.of("default");
+            }
+            String dbSql = dialect(conn).databasesSql();
+            if (dbSql == null) {
+                throw new ServiceException("当前数据库类型(" + conn.getDbType() + ")未适配元数据浏览, 仅支持连接与基础 SQL 查询");
+            }
+            List<String> list = new ArrayList<>();
+            try (Connection connection = connectionManager.getConnection(conn);
+                 Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(dbSql)) {
+                while (rs.next()) {
+                    String name = rs.getString(1);
+                    if (!SYS_SCHEMAS.contains(name)) {
+                        list.add(name);
+                    }
+                }
+            } catch (Exception e) {
+                throw new ServiceException("查询数据库列表失败: " + e.getMessage());
+            }
+            return list;
+        });
     }
 
     @Override
     public List<DbTableVo> tables(Long connId, String schema) {
         DbConn conn = getConn(connId);
         String db = StrUtil.blankToDefault(schema, conn.getDatabaseName());
-        List<DbTableVo> list = new ArrayList<>();
-        // Redis: SCAN 增量迭代获取 key(上限 5000)
-        if (isRedis(conn)) {
-            LinkedHashSet<String> keys = new LinkedHashSet<>();
-            String cursor = "0";
-            int guard = 0;
-            do {
-                List<String> repl = connectionManager.redisCommand(conn, db, "SCAN", cursor, "COUNT", "500");
-                if (repl.isEmpty()) {
-                    break;
-                }
-                cursor = repl.get(0);
-                for (int i = 1; i < repl.size() && keys.size() < 5000; i++) {
-                    keys.add(repl.get(i));
-                }
-                guard++;
-            } while (!"0".equals(cursor) && keys.size() < 5000 && guard < 50);
-            for (String k : keys) {
-                DbTableVo vo = new DbTableVo();
-                vo.setTableName(k);
-                vo.setTableType("KEY");
-                vo.setTableComment("Redis Key");
-                list.add(vo);
-            }
-            return list;
-        }
-        String sql = dialect(conn).tablesSql();
-        if (sql == null) {
-            throw new ServiceException("当前数据库类型(" + conn.getDbType() + ")未适配表元数据查询, 仅支持连接与基础 SQL 查询");
-        }
-        // Elasticsearch: 索引列表(表=索引), 通过 REST _cat/indices 获取(与 DBeaver 一致)
-        if (isEs(conn)) {
-            Object obj = connectionManager.esRest(conn, "GET", "/_cat/indices?format=json", null);
-            if (obj instanceof cn.hutool.json.JSONArray arr) {
-                for (Object o : arr) {
-                    cn.hutool.json.JSONObject row = (cn.hutool.json.JSONObject) o;
+        return metaCache.get(connId, "tables", db, () -> {
+            List<DbTableVo> list = new ArrayList<>();
+            // Redis: SCAN 增量迭代获取 key(上限 5000)
+            if (isRedis(conn)) {
+                LinkedHashSet<String> keys = new LinkedHashSet<>();
+                String cursor = "0";
+                int guard = 0;
+                do {
+                    List<String> repl = connectionManager.redisCommand(conn, db, "SCAN", cursor, "COUNT", "500");
+                    if (repl.isEmpty()) {
+                        break;
+                    }
+                    cursor = repl.get(0);
+                    for (int i = 1; i < repl.size() && keys.size() < 5000; i++) {
+                        keys.add(repl.get(i));
+                    }
+                    guard++;
+                } while (!"0".equals(cursor) && keys.size() < 5000 && guard < 50);
+                for (String k : keys) {
                     DbTableVo vo = new DbTableVo();
-                    vo.setTableName(row.getStr("index"));
-                    vo.setTableComment("文档数=" + row.getStr("docs.count", "0") + ", 状态=" + row.getStr("status", ""));
-                    vo.setTableType("INDEX");
+                    vo.setTableName(k);
+                    vo.setTableType("KEY");
+                    vo.setTableComment("Redis Key");
                     list.add(vo);
                 }
+                return list;
+            }
+            String sql = dialect(conn).tablesSql();
+            if (sql == null) {
+                throw new ServiceException("当前数据库类型(" + conn.getDbType() + ")未适配表元数据查询, 仅支持连接与基础 SQL 查询");
+            }
+            // Elasticsearch: 索引列表(表=索引), 通过 REST _cat/indices 获取(与 DBeaver 一致)
+            if (isEs(conn)) {
+                Object obj = connectionManager.esRest(conn, "GET", "/_cat/indices?format=json", null);
+                if (obj instanceof cn.hutool.json.JSONArray arr) {
+                    for (Object o : arr) {
+                        cn.hutool.json.JSONObject row = (cn.hutool.json.JSONObject) o;
+                        DbTableVo vo = new DbTableVo();
+                        vo.setTableName(row.getStr("index"));
+                        vo.setTableComment("文档数=" + row.getStr("docs.count", "0") + ", 状态=" + row.getStr("status", ""));
+                        vo.setTableType("INDEX");
+                        list.add(vo);
+                    }
+                }
+                return list;
+            }
+            try (Connection connection = connectionManager.getConnection(conn);
+                 PreparedStatement ps = connection.prepareStatement(sql)) {
+                ps.setString(1, db);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        DbTableVo vo = new DbTableVo();
+                        vo.setTableName(rs.getString("TABLE_NAME"));
+                        vo.setTableComment(rs.getString("TABLE_COMMENT"));
+                        vo.setTableType(rs.getString("TABLE_TYPE"));
+                        vo.setEngine(rs.getString("ENGINE"));
+                        vo.setTableRows(rs.getLong("TABLE_ROWS"));
+                        vo.setCreateTime(rs.getString("CREATE_TIME"));
+                        list.add(vo);
+                    }
+                }
+            } catch (Exception e) {
+                throw new ServiceException("查询表列表失败: " + e.getMessage());
             }
             return list;
-        }
-        try (Connection connection = connectionManager.getConnection(conn);
-             PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, db);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    DbTableVo vo = new DbTableVo();
-                    vo.setTableName(rs.getString("TABLE_NAME"));
-                    vo.setTableComment(rs.getString("TABLE_COMMENT"));
-                    vo.setTableType(rs.getString("TABLE_TYPE"));
-                    vo.setEngine(rs.getString("ENGINE"));
-                    vo.setTableRows(rs.getLong("TABLE_ROWS"));
-                    vo.setCreateTime(rs.getString("CREATE_TIME"));
-                    list.add(vo);
-                }
-            }
-        } catch (Exception e) {
-            throw new ServiceException("查询表列表失败: " + e.getMessage());
-        }
-        return list;
+        });
     }
 
     @Override
@@ -378,7 +334,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
                     if (properties == null) {
                         continue;
                     }
-                    collectEsFields(properties, "", list);
+                    esMetaSupport.collectEsFields(properties, "", list);
                 }
             }
             return list;
@@ -667,6 +623,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
 
     @Override
     public void createDatabase(Long connId, String dbName, String charset) {
+        metaCache.evict(connId);
         DbConn conn = getConn(connId);
         if (isRedis(conn)) {
 
@@ -690,6 +647,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
 
     @Override
     public void dropTable(Long connId, String schema, String table, String confirmationToken, String userId) {
+        metaCache.evict(connId);
         DbConn conn = getConn(connId);
         DbAccessPolicy.requireWritable(conn);
         if (isRedis(conn)) {
@@ -717,6 +675,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
 
     @Override
     public void renameTable(Long connId, String schema, String oldName, String newName) {
+        metaCache.evict(connId);
         DbConn conn = getConn(connId);
         if (isRedis(conn)) {
 
@@ -737,6 +696,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
 
     @Override
     public void addColumn(Long connId, String schema, String table, DbColumnVo column) {
+        metaCache.evict(connId);
         DbConn conn = getConn(connId);
         if (isRedis(conn)) {
 
@@ -759,6 +719,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
 
     @Override
     public void dropColumn(Long connId, String schema, String table, String columnName, String confirmationToken, String userId) {
+        metaCache.evict(connId);
         DbConn conn = getConn(connId);
         DbAccessPolicy.requireWritable(conn);
         if (isRedis(conn)) {
@@ -787,6 +748,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
 
     @Override
     public void modifyColumn(Long connId, String schema, String table, String oldColumnName, DbColumnVo column) {
+        metaCache.evict(connId);
         DbConn conn = getConn(connId);
         if (isRedis(conn)) {
 
@@ -811,6 +773,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
 
     @Override
     public void executeDdl(Long connId, String sql) {
+        metaCache.evict(connId);
         DbConn conn = getConn(connId);
         DbAccessPolicy.requireWritable(conn);
         if (isRedis(conn)) {
@@ -844,7 +807,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
             DbAccessPolicy.requireReadOnlyStatement(trimSql);
         }
         if (isEs(conn)) {
-            return esQuery(conn, trimSql, pageNum, pageSize);
+            return esMetaSupport.esQuery(conn, trimSql, pageNum, pageSize);
         }
         if (trimSql.endsWith(";")) {
             trimSql = trimSql.substring(0, trimSql.length() - 1).trim();
@@ -866,7 +829,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
         try (Connection connection = connectionManager.getConnection(conn);
              Statement stmt = connection.createStatement()) {
             applyDbName(connection, conn, dbName);
-            stmt.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+            stmt.setQueryTimeout(properties.getQueryTimeoutSeconds());
             attachQueryExecution(executionId, execution, stmt);
             // 分页: MySQL 追加 LIMIT (SQL 已含 LIMIT 时不追加)
             String finalSql = trimSql;
@@ -992,7 +955,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
             DbAccessPolicy.requireReadOnlyStatement(trimSql);
         }
         if (isEs(conn)) {
-            return esQuery(conn, trimSql, 1, 200);
+            return esMetaSupport.esQuery(conn, trimSql, 1, 200);
         }
         if (trimSql.endsWith(";")) {
             trimSql = trimSql.substring(0, trimSql.length() - 1).trim();
@@ -1025,7 +988,7 @@ public class DbMetaServiceImpl implements IDbMetaService {
         try (Connection connection = connectionManager.getConnection(conn);
              Statement stmt = connection.createStatement()) {
             applyDbName(connection, conn, dbName);
-            stmt.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+            stmt.setQueryTimeout(properties.getQueryTimeoutSeconds());
             attachQueryExecution(executionId, execution, stmt);
             boolean hasResultSet = stmt.execute(trimSql);
             int affected = stmt.getUpdateCount();
@@ -1176,76 +1139,6 @@ public class DbMetaServiceImpl implements IDbMetaService {
     /**
      * Elasticsearch REST SQL 查询(REST /_sql, Basic 许可可用; ES 7.x JDBC 需白金许可故走 REST)
      */
-    private DbResultVo esQuery(DbConn conn, String sql, Integer pageNum, Integer pageSize) {
-        long start = System.currentTimeMillis();
-        DbResultVo result = new DbResultVo();
-        result.setSqlType("select");
-        String trimSql = sql.trim();
-        if (trimSql.endsWith(";")) {
-            trimSql = trimSql.substring(0, trimSql.length() - 1).trim();
-        }
-        int fetch = pageSize == null || pageSize <= 0 ? 200 : Math.min(pageSize, 1000);
-        int offset = pageNum != null && pageNum > 0 ? Math.max(pageNum - 1, 0) * (pageSize == null || pageSize <= 0 ? 200 : pageSize) : 0;
-        // 分页: ES REST SQL 仅支持 LIMIT count(单值), 不支持 MySQL 的 LIMIT offset,size
-        // 故查询 offset+fetch 条后在内存中截取 offset 之后的 fetch 条
-        String finalSql = trimSql;
-        boolean hasLimit = LIMIT_PATTERN.matcher(trimSql).find();
-        if (!hasLimit) {
-            finalSql = trimSql + " LIMIT " + (offset + fetch);
-        }
-        cn.hutool.json.JSONObject body = new cn.hutool.json.JSONObject();
-        body.set("query", finalSql);
-        body.set("fetch_size", fetch);
-        Object obj = connectionManager.esRest(conn, "POST", "/_sql", body);
-        if (obj instanceof cn.hutool.json.JSONObject resp) {
-            cn.hutool.json.JSONArray cols = resp.getJSONArray("columns");
-            cn.hutool.json.JSONArray rows = resp.getJSONArray("rows");
-            List<String> columns = new ArrayList<>();
-            List<String> columnTypes = new ArrayList<>();
-            if (cols != null) {
-                for (Object c : cols) {
-                    cn.hutool.json.JSONObject col = (cn.hutool.json.JSONObject) c;
-                    columns.add(col.getStr("name"));
-                    columnTypes.add(col.getStr("type"));
-                }
-            }
-            result.setColumns(columns);
-            result.setColumnTypes(columnTypes);
-            List<Map<String, Object>> rowsList = new ArrayList<>();
-            if (rows != null) {
-                for (Object r : rows) {
-                    cn.hutool.json.JSONArray row = (cn.hutool.json.JSONArray) r;
-                    Map<String, Object> m = new LinkedHashMap<>();
-                    for (int i = 0; i < columns.size() && i < row.size(); i++) {
-                        m.put(columns.get(i), row.get(i));
-                    }
-                    rowsList.add(m);
-                }
-            }
-            // 内存分页截取(ES 不支持 LIMIT offset,size)
-            if (offset > 0 && rowsList.size() > offset) {
-                rowsList = new ArrayList<>(rowsList.subList(offset, Math.min(rowsList.size(), offset + fetch)));
-            } else if (offset > 0) {
-                rowsList = new ArrayList<>();
-            }
-            result.setRows(rowsList);
-            // 关闭服务端 cursor(释放资源)
-            String cursor = resp.getStr("cursor");
-            if (cursor != null && !cursor.isEmpty()) {
-                cn.hutool.json.JSONObject close = new cn.hutool.json.JSONObject();
-                close.set("cursor", cursor);
-                try {
-                    connectionManager.esRest(conn, "POST", "/_sql/close", close);
-                } catch (Exception ignored) {
-                }
-            }
-            result.setSuccess(true);
-            result.setCostMs(System.currentTimeMillis() - start);
-            return result;
-        }
-        throw new ServiceException("Elasticsearch 查询返回格式异常");
-    }
-
     /**
      * 高危SQL检测, 返回警告信息; 非高危返回null
      */
@@ -1437,349 +1330,42 @@ public class DbMetaServiceImpl implements IDbMetaService {
         return m;
     }
 
-    // ==================== Redis 可视化管理 ====================
+    // ==================== Redis 可视化管理(委托 DbRedisMetaSupport) ====================
 
-    private static final Pattern DANGEROUS_REDIS_CMD = Pattern.compile("^(flushall|flushdb|shutdown|debug|monitor|config\\s+set|slaveof|replicaof|keys)\\b", Pattern.CASE_INSENSITIVE);
-
-    private String redisOne(DbConn conn, String db, String... args) {
-        List<String> repl = connectionManager.redisCommand(conn, db, args);
-        return repl.isEmpty() ? "" : repl.get(0);
-    }
-
-    private String redisClean(String v) {
-        if (v == null) {
-            return "";
-        }
-        if (v.startsWith("+") || v.startsWith(":") || v.startsWith("-")) {
-            return v.substring(1);
-        }
-        return v;
-    }
-
-    private void ensureRedis(DbConn conn) {
-        if (!isRedis(conn)) {
-            throw new ServiceException("该连接不是 Redis 类型");
-        }
-    }
-
-    /**
-     * Redis 键列表(SCAN 增量迭代, 支持 * 通配符)
-     */
     public Map<String, Object> redisKeys(Long connId, String db, String pattern, String cursor, int count) {
-        DbConn conn = getConn(connId);
-        ensureRedis(conn);
-        String cur = StrUtil.blankToDefault(cursor, "0");
-        int cnt = count <= 0 ? 200 : Math.min(count, 1000);
-        List<String> repl = connectionManager.redisCommand(conn, db, "SCAN", cur, "MATCH", StrUtil.blankToDefault(pattern, "*"), "COUNT", String.valueOf(cnt));
-        Map<String, Object> result = new LinkedHashMap<>();
-        String next = repl.isEmpty() ? "0" : redisClean(repl.get(0));
-        List<String> keys = repl.size() > 1 ? new ArrayList<>(repl.subList(1, repl.size())) : List.of();
-        result.put("cursor", next);
-        result.put("keys", keys);
-        return result;
+        return redisMetaSupport.redisKeys(connId, db, pattern, cursor, count);
     }
 
-    /**
-     * Redis 键信息(TYPE/TTL/内存占用/元素数量)
-     */
     public Map<String, Object> redisKeyInfo(Long connId, String db, String key) {
-        DbConn conn = getConn(connId);
-        ensureRedis(conn);
-        Map<String, Object> info = new LinkedHashMap<>();
-        info.put("key", key);
-        info.put("type", redisClean(redisOne(conn, db, "TYPE", key)));
-        String ttl = redisClean(redisOne(conn, db, "TTL", key));
-        info.put("ttl", "-2".equals(ttl) || "-1".equals(ttl) ? ttl : ttl);
-        String size = redisClean(redisOne(conn, db, "MEMORY", "USAGE", key));
-        if (size.startsWith("ERR") || size.isBlank()) {
-            size = "";
-        }
-        info.put("size", size);
-        return info;
+        return redisMetaSupport.redisKeyInfo(connId, db, key);
     }
 
-    /**
-     * Redis 键值读取(按类型结构化返回)
-     */
     public Map<String, Object> redisValue(Long connId, String db, String key, String type) {
-        DbConn conn = getConn(connId);
-        ensureRedis(conn);
-        String t = StrUtil.blankToDefault(type, redisClean(redisOne(conn, db, "TYPE", key)));
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("key", key);
-        result.put("type", t);
-        switch (t) {
-            case "string" -> {
-                byte[] bytes = connectionManager.redisBytes(conn, db, key);
-                if (bytes == null) {
-                    result.put("value", null);
-                    break;
-                }
-                String utf8 = new String(bytes, StandardCharsets.UTF_8);
-                if (isUtf8Text(bytes, utf8)) {
-                    result.put("value", utf8);
-                } else {
-                    // 二进制内容: 返回 Hex 供前端查看/编辑
-                    result.put("binary", true);
-                    result.put("hex", toHex(bytes));
-                }
-            }
-            case "hash" -> {
-                List<String> fv = connectionManager.redisCommand(conn, db, "HGETALL", key);
-                List<Map<String, String>> fields = new ArrayList<>();
-                for (int i = 0; i + 1 < fv.size(); i += 2) {
-                    Map<String, String> m = new LinkedHashMap<>();
-                    m.put("field", fv.get(i));
-                    m.put("value", fv.get(i + 1));
-                    fields.add(m);
-                }
-                result.put("fields", fields);
-            }
-            case "list" -> {
-                List<String> items = connectionManager.redisCommand(conn, db, "LRANGE", key, "0", "-1");
-                List<Map<String, Object>> rows = new ArrayList<>();
-                for (int i = 0; i < items.size(); i++) {
-                    Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("index", i);
-                    m.put("value", items.get(i));
-                    rows.add(m);
-                }
-                result.put("items", rows);
-            }
-            case "set" -> result.put("members", connectionManager.redisCommand(conn, db, "SMEMBERS", key));
-            case "zset" -> {
-                List<String> ms = connectionManager.redisCommand(conn, db, "ZRANGE", key, "0", "-1", "WITHSCORES");
-                List<Map<String, Object>> rows = new ArrayList<>();
-                for (int i = 0; i + 1 < ms.size(); i += 2) {
-                    Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("member", ms.get(i));
-                    m.put("score", ms.get(i + 1));
-                    rows.add(m);
-                }
-                result.put("items", rows);
-            }
-            case "stream" -> result.put("note", "Stream 类型暂不支持在线编辑, 请使用 CLI");
-            default -> {
-                String v = redisOne(conn, db, "GET", key);
-                result.put("value", v);
-            }
-        }
-        return result;
+        return redisMetaSupport.redisValue(connId, db, key, type);
     }
 
-    /**
-     * Redis 键写入(新增/更新, 按类型; ttl 为 null 不动, >=0 设置, <0 持久化)
-     */
     public void redisSet(Long connId, String db, String key, String type, String value, Long ttl, List<Map<String, String>> fields) {
-        DbConn conn = getConn(connId);
-        DbAccessPolicy.requireWritable(conn);
-        ensureRedis(conn);
-        String t = StrUtil.blankToDefault(type, "string");
-        switch (t) {
-            case "string" -> {
-                if (value == null) {
-                    throw new ServiceException("值不能为空");
-                }
-                if (value.startsWith("__HEX__")) {
-                    // 二进制内容: Hex 解码后原样写回
-                    connectionManager.redisSetBytes(conn, db, key, fromHex(value.substring(7)));
-                } else {
-                    connectionManager.redisCommand(conn, db, "SET", key, value);
-                }
-            }
-            case "hash" -> {
-                connectionManager.redisCommand(conn, db, "DEL", key);
-                if (fields != null && !fields.isEmpty()) {
-                    for (Map<String, String> f : fields) {
-                        connectionManager.redisCommand(conn, db, "HSET", key,
-                            StrUtil.blankToDefault(f.get("field"), ""),
-                            StrUtil.blankToDefault(f.get("value"), ""));
-                    }
-                }
-            }
-            case "list" -> {
-                connectionManager.redisCommand(conn, db, "DEL", key);
-                if (fields != null && !fields.isEmpty()) {
-                    List<String> args = new ArrayList<>();
-                    args.add("RPUSH");
-                    args.add(key);
-                    for (Map<String, String> f : fields) {
-                        args.add(StrUtil.blankToDefault(f.get("value"), ""));
-                    }
-                    connectionManager.redisCommand(conn, db, args.toArray(new String[0]));
-                }
-            }
-            case "set" -> {
-                connectionManager.redisCommand(conn, db, "DEL", key);
-                if (fields != null && !fields.isEmpty()) {
-                    List<String> args = new ArrayList<>();
-                    args.add("SADD");
-                    args.add(key);
-                    for (Map<String, String> f : fields) {
-                        args.add(StrUtil.blankToDefault(f.get("value"), ""));
-                    }
-                    connectionManager.redisCommand(conn, db, args.toArray(new String[0]));
-                }
-            }
-            case "zset" -> {
-                connectionManager.redisCommand(conn, db, "DEL", key);
-                if (fields != null && !fields.isEmpty()) {
-                    for (Map<String, String> f : fields) {
-                        connectionManager.redisCommand(conn, db, "ZADD", key,
-                            StrUtil.blankToDefault(f.get("score"), "0"),
-                            StrUtil.blankToDefault(f.get("value"), ""));
-                    }
-                }
-            }
-            default -> throw new ServiceException("不支持的键类型: " + t);
-        }
-        if (ttl != null && ttl >= 0) {
-            connectionManager.redisCommand(conn, db, "EXPIRE", key, String.valueOf(ttl));
-        } else if (ttl != null && ttl < 0) {
-            connectionManager.redisCommand(conn, db, "PERSIST", key);
-        }
+        metaCache.evict(connId);
+        redisMetaSupport.redisSet(connId, db, key, type, value, ttl, fields);
     }
 
-    /**
-     * Redis 键删除
-     */
     public void redisDel(Long connId, String db, List<String> keys) {
-        DbConn conn = getConn(connId);
-        DbAccessPolicy.requireWritable(conn);
-        ensureRedis(conn);
-        if (keys == null || keys.isEmpty()) {
-            return;
-        }
-        List<String> args = new ArrayList<>();
-        args.add("DEL");
-        args.addAll(keys);
-        connectionManager.redisCommand(conn, db, args.toArray(new String[0]));
+        metaCache.evict(connId);
+        redisMetaSupport.redisDel(connId, db, keys);
     }
 
-    /**
-     * Redis TTL 更新(>=0 设置过期秒, <0 持久化)
-     */
     public void redisExpire(Long connId, String db, String key, Long ttl) {
-        DbConn conn = getConn(connId);
-        DbAccessPolicy.requireWritable(conn);
-        ensureRedis(conn);
-        if (ttl != null && ttl >= 0) {
-            connectionManager.redisCommand(conn, db, "EXPIRE", key, String.valueOf(ttl));
-        } else {
-            connectionManager.redisCommand(conn, db, "PERSIST", key);
-        }
+        metaCache.evict(connId);
+        redisMetaSupport.redisExpire(connId, db, key, ttl);
     }
 
-    /**
-     * Redis INFO 信息(解析为 section -> k/v)
-     */
     public Map<String, Object> redisInfo(Long connId, String db) {
-        DbConn conn = getConn(connId);
-        ensureRedis(conn);
-        String raw = redisOne(conn, db, "INFO");
-        Map<String, Object> result = new LinkedHashMap<>();
-        Map<String, String> current = new LinkedHashMap<>();
-        for (String line : raw.split("\r?\n")) {
-            if (line.isBlank()) {
-                continue;
-            }
-            if (line.startsWith("#")) {
-                current = new LinkedHashMap<>();
-                result.put(line.substring(1).trim(), current);
-                continue;
-            }
-            int idx = line.indexOf(':');
-            if (idx > 0) {
-                current.put(line.substring(0, idx), line.substring(idx + 1));
-            }
-        }
-        return result;
+        return redisMetaSupport.redisInfo(connId, db);
     }
 
-    /**
-     * Redis CLI 通用命令执行(返回平铺结果)
-     */
     public Object redisCli(Long connId, String db, String command) {
-        DbConn conn = getConn(connId);
-        ensureRedis(conn);
-        String cmd = StrUtil.trim(command);
-        if (cmd.isBlank()) {
-            throw new ServiceException("命令不能为空");
-        }
-        String[] parts = cmd.split("\\s+");
-        String first = parts[0].toLowerCase();
-        if (DbAccessPolicy.isReadOnly(conn) && !DbAccessPolicy.isReadOnlyRedisCommand(cmd)) {
-            DbAccessPolicy.requireWritable(conn);
-        }
-        // KEYS 限量执行(用 SCAN 替代, 最多 1000 条), 其余危险命令拦截
-        if ("keys".equals(first) || first.startsWith("keys*")) {
-            String pattern = parts.length > 1 ? parts[1] : (first.equals("keys") ? "*" : first.substring(4));
-            List<String> out = new ArrayList<>();
-            String cur = "0";
-            int guard = 0;
-            while (guard++ < 200) {
-                List<String> batch = connectionManager.redisCommand(conn, db, "SCAN", cur, "MATCH", pattern, "COUNT", "500");
-                if (batch.isEmpty()) {
-                    break;
-                }
-                String nextCur = redisClean(batch.get(0));
-                for (int i = 1; i < batch.size(); i++) {
-                    out.add(batch.get(i));
-                }
-                cur = nextCur;
-                if ("0".equals(cur) || out.size() >= 1000) {
-                    break;
-                }
-            }
-            out.add(0, "(KEYS 已限量执行, 共 " + out.size() + " 条; 大库请优先使用 SCAN 避免阻塞)");
-            return out;
-        }
-        if (DANGEROUS_REDIS_CMD.matcher(cmd).find()) {
-            throw new ServiceException("危险命令已拦截: " + first + " (FLUSHALL/FLUSHDB/SHUTDOWN/DEBUG/MONITOR/CONFIG SET 等禁止在工作台执行)");
-        }
-        List<String> repl = connectionManager.redisCommand(conn, db, parts);
-        List<String> cleaned = new ArrayList<>(repl.size());
-        for (String v : repl) {
-            cleaned.add(redisClean(v));
-        }
-        return cleaned;
+        return redisMetaSupport.redisCli(connId, db, command);
     }
-
-    // ==================== Redis 二进制值处理 ====================
-
-    private boolean isUtf8Text(byte[] bytes, String decoded) {
-        if (decoded.indexOf('\uFFFD') >= 0) {
-            return false;
-        }
-        for (int i = 0; i < decoded.length(); i++) {
-            char c = decoded.charAt(i);
-            if (c == 0) {
-                return false;
-            }
-            if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private String toHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02X", b & 0xFF));
-        }
-        return sb.toString();
-    }
-
-    private byte[] fromHex(String s) {
-        int len = s.length() / 2;
-        byte[] out = new byte[len];
-        for (int i = 0; i < len; i++) {
-            out[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
-        }
-        return out;
-    }
-
     // ==================== 数据迁移 & Excel 导入 ====================
 
     @Override

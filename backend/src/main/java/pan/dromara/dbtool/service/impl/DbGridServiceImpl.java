@@ -2,6 +2,8 @@ package pan.dromara.dbtool.service.impl;
 
 import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.core.DbConnectionManager;
+import pan.dromara.dbtool.config.DbToolProperties;
+import pan.dromara.dbtool.core.dialect.DbDialectRegistry;
 import pan.dromara.dbtool.domain.DbConn;
 import pan.dromara.dbtool.service.IDbGridService;
 import pan.dromara.dbtool.service.IDbMetaService;
@@ -35,17 +37,20 @@ public class DbGridServiceImpl implements IDbGridService {
 
     private static final Pattern SELECT_START = Pattern.compile(
         "^\\s*(select|with|show|describe|desc|explain)\\b", Pattern.CASE_INSENSITIVE);
-    private static final int QUERY_TIMEOUT_SECONDS = 120;
-    private static final int MAX_PAGE_SIZE = 1000;
     private static final Set<String> OP_WHITELIST =
         Set.of("eq", "ne", "gt", "ge", "lt", "le", "like", "in", "between", "isnull", "notnull");
 
     private final DbConnectionManager connectionManager;
     private final IDbMetaService metaService;
+    private final DbDialectRegistry dialectRegistry;
+    private final DbToolProperties properties;
 
-    public DbGridServiceImpl(DbConnectionManager connectionManager, IDbMetaService metaService) {
+    public DbGridServiceImpl(DbConnectionManager connectionManager, IDbMetaService metaService,
+                             DbDialectRegistry dialectRegistry, DbToolProperties properties) {
         this.connectionManager = connectionManager;
         this.metaService = metaService;
+        this.dialectRegistry = dialectRegistry;
+        this.properties = properties;
     }
 
     @Override
@@ -55,7 +60,7 @@ public class DbGridServiceImpl implements IDbGridService {
             throw new ServiceException("connId 不能为空");
         }
         String trimSql = validateQuery(sql);
-        int size = Math.max(1, Math.min(pageSize, MAX_PAGE_SIZE));
+        int size = Math.max(1, Math.min(pageSize, properties.getGridMaxPageSize()));
         int page = Math.max(pageNum, 1);
         int offset = (page - 1) * size;
         DbConn conn = metaService.getConn(connId);
@@ -70,7 +75,7 @@ public class DbGridServiceImpl implements IDbGridService {
         List<String> columnTypes;
         try (Connection connection = connectionManager.getConnection(conn);
              java.sql.Statement stmt = connection.createStatement()) {
-            stmt.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+            stmt.setQueryTimeout(properties.getQueryTimeoutSeconds());
             stmt.setMaxRows(1);
             try (ResultSet rs = stmt.executeQuery(trimSql)) {
                 ResultSetMetaData meta = rs.getMetaData();
@@ -102,7 +107,7 @@ public class DbGridServiceImpl implements IDbGridService {
         String countSql = "SELECT COUNT(*) FROM (" + trimSql + ") g" + where.sql;
         try (Connection connection = connectionManager.getConnection(conn);
              PreparedStatement ps = connection.prepareStatement(countSql)) {
-            ps.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+            ps.setQueryTimeout(properties.getQueryTimeoutSeconds());
             bindParams(ps, where.params);
             try (ResultSet rs = ps.executeQuery()) {
                 total = rs.next() ? rs.getLong(1) : 0;
@@ -111,19 +116,22 @@ public class DbGridServiceImpl implements IDbGridService {
             throw new ServiceException("统计行数失败: " + translate(e));
         }
 
-        // 5) 分页查询(分页值由服务端生成, 数值拼接安全; 过滤值全部参数化)
-        String pageSql = "SELECT * FROM (" + trimSql + ") g" + where.sql + orderSql + paginate(dialectName, offset, size);
+        // 5) 分页查询(分页值由服务端生成, 数值拼接安全; 过滤值全部参数化; 分页委托方言, 未知方言回退通用 OFFSET/FETCH)
+        String baseSql = "SELECT * FROM (" + trimSql + ") g" + where.sql + orderSql;
+        String pageSql = dialectRegistry.paginate(dialectName, baseSql, offset, size);
         List<Map<String, Object>> rows = new ArrayList<>();
         try (Connection connection = connectionManager.getConnection(conn);
              PreparedStatement ps = connection.prepareStatement(pageSql)) {
-            ps.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+            ps.setQueryTimeout(properties.getQueryTimeoutSeconds());
             bindParams(ps, where.params);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     Map<String, Object> row = new LinkedHashMap<>();
                     for (int i = 0; i < columns.size(); i++) {
                         Object v = rs.getObject(i + 1);
-                        row.put(columns.get(i), v == null ? null : String.valueOf(v));
+                        // 保留原生类型(Number/Boolean/Date/String), 由 JSON 序列化框架自然处理, 便于前端区分数字/日期;
+                        // 非标准 JDBC 类型(Blob/Clob 等)兜底转 String 保证可序列化
+                        row.put(columns.get(i), keepType(v));
                     }
                     rows.add(row);
                 }
@@ -159,14 +167,6 @@ public class DbGridServiceImpl implements IDbGridService {
 
     private static boolean isMysqlLike(String dialect) {
         return dialect.contains("mysql") || dialect.contains("maria") || dialect.contains("dm");
-    }
-
-    private static String paginate(String dialect, int offset, int size) {
-        if (isMysqlLike(dialect)) {
-            return " LIMIT " + size + " OFFSET " + offset;
-        }
-        // PG / Oracle / SQLServer: OFFSET..FETCH NEXT..ROWS ONLY
-        return " OFFSET " + offset + " ROWS FETCH NEXT " + size + " ROWS ONLY";
     }
 
     private static WhereClause buildWhere(List<Map<String, Object>> filters, Set<String> columnSet, String quote) {
@@ -247,6 +247,24 @@ public class DbGridServiceImpl implements IDbGridService {
         String order = "desc".equalsIgnoreCase(String.valueOf(sort.get("order"))) ? "DESC" : "ASC";
         String q = quote + column.replace(quote, quote + quote) + quote;
         return " ORDER BY " + q + " " + order;
+    }
+
+    /**
+     * 保留可安全序列化的原生类型(Number/Boolean/Character/字符串/日期), 其余转 String(保证 JSON 可序列化)
+     */
+    private static Object keepType(Object v) {
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof Number || v instanceof Boolean || v instanceof Character
+            || v instanceof CharSequence || v instanceof java.util.Date) {
+            return v;
+        }
+        if (v instanceof byte[] b) {
+            // byte[] 转 Base64, 避免 Object.toString() 输出无意义对象引用
+            return java.util.Base64.getEncoder().encodeToString(b);
+        }
+        return String.valueOf(v);
     }
 
     private static String str(Object v) {

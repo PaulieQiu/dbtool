@@ -34,20 +34,47 @@ public class DbGridController {
     @SaCheckPermission("dbtool:meta:list")
     @PostMapping("/query")
     public R<Map<String, Object>> query(@RequestBody Map<String, Object> body) {
-        Long connId = body == null ? null : Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = parseLong(body == null ? null : body.get("connId"));
         String sql = body == null ? null : String.valueOf(body.get("sql"));
-        int pageNum = body == null || body.get("pageNum") == null ? 1 : Integer.parseInt(String.valueOf(body.get("pageNum")));
-        int pageSize = body == null || body.get("pageSize") == null ? 100 : Integer.parseInt(String.valueOf(body.get("pageSize")));
+        Integer pageNum = parseInt(body == null ? null : body.get("pageNum"), 1);
+        Integer pageSize = parseInt(body == null ? null : body.get("pageSize"), 100);
+        if (connId == null || StrUtil.isBlank(sql)) {
+            return R.fail("connId 与 sql 不能为空");
+        }
+        if (pageNum == null || pageSize == null) {
+            return R.fail("pageNum/pageSize 参数格式不正确");
+        }
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> filters = body == null || !(body.get("filters") instanceof List)
             ? null : (List<Map<String, Object>>) body.get("filters");
         @SuppressWarnings("unchecked")
         Map<String, Object> sort = body == null || !(body.get("sort") instanceof Map)
             ? null : (Map<String, Object>) body.get("sort");
-        if (connId == null || StrUtil.isBlank(sql)) {
-            return R.fail("connId 与 sql 不能为空");
-        }
         return R.ok(gridService.query(connId, sql, pageNum, pageSize, filters, sort));
+    }
+
+    /** 安全解析 Long: 缺失或格式非法返回 null(不抛 NumberFormatException) */
+    private static Long parseLong(Object v) {
+        if (v == null) {
+            return null;
+        }
+        try {
+            return Long.valueOf(String.valueOf(v));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** 安全解析 int: 缺失返回默认值; 格式非法返回 null 由调用方拒绝 */
+    private static Integer parseInt(Object v, int def) {
+        if (v == null) {
+            return def;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(v));
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
 }

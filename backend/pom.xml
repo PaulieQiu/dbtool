@@ -107,6 +107,13 @@
             <version>${neo4j-driver.version}</version>
         </dependency>
 
+        <!-- Caffeine: 连接池缓存淘汰(长期不用的池自动关闭, 防内存泄漏) -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+            <version>3.1.8</version>
+        </dependency>
+
         <!-- Lombok -->
         <dependency>
             <groupId>org.projectlombok</groupId>

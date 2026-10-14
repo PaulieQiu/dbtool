@@ -38,7 +38,12 @@ public class PostgreSqlDialectAdapter implements DbDialectAdapter {
         return "POSTGRESQL".equals(t) || "KINGBASE".equals(t)
             || "HIGHGO".equals(t) || "HIGRES".equals(t)
             || "GREENPLUM".equals(t) || "EDB".equals(t) || "COCKROACHDB".equals(t)
-            || "YUGABYTEDB".equals(t) || "TIMESCALEDB".equals(t) || "REDSHIFT".equals(t);
+            || "YUGABYTEDB".equals(t) || "TIMESCALEDB".equals(t) || "REDSHIFT".equals(t)
+            // C.3.35: openGauss / 虚谷 XUGU 均基于 PG 内核(pg_catalog 元数据), 归入本族;
+            // QuestDB 完整实现 PG Wire 协议(官方推荐用标准 PostgreSQL JDBC 驱动连接), 亦归入本族;
+            // GaussDB(华为) 与 openGauss 同源、Vastbase(海量) 基于 openGauss/PG 内核, 均复用 openGauss 驱动归入本族(待实测)
+            || "OPENGUSS".equals(t) || "XUGU".equals(t) || "QUESTDB".equals(t)
+            || "GAUSSDB".equals(t) || "VASTBASE".equals(t);
     }
 
     @Override

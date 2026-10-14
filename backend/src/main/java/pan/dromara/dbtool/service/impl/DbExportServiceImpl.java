@@ -1,5 +1,6 @@
 package pan.dromara.dbtool.service.impl;
 
+import pan.dromara.dbtool.config.DbToolProperties;
 import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.core.DbConnectionManager;
 import pan.dromara.dbtool.domain.DbConn;
@@ -36,8 +37,6 @@ public class DbExportServiceImpl implements IDbExportService {
 
     /** 默认导出行数上限 */
     private static final long DEFAULT_MAX_ROWS = 100000;
-    /** 导出语句超时(秒) */
-    private static final int EXPORT_TIMEOUT_SECONDS = 300;
 
     private static final Pattern SELECT_START = Pattern.compile(
         "^\\s*(select|show|describe|desc|explain)\\b", Pattern.CASE_INSENSITIVE);
@@ -48,10 +47,13 @@ public class DbExportServiceImpl implements IDbExportService {
 
     private final DbConnectionManager connectionManager;
     private final IDbMetaService metaService;
+    private final DbToolProperties properties;
 
-    public DbExportServiceImpl(DbConnectionManager connectionManager, IDbMetaService metaService) {
+    public DbExportServiceImpl(DbConnectionManager connectionManager, IDbMetaService metaService,
+                               DbToolProperties properties) {
         this.connectionManager = connectionManager;
         this.metaService = metaService;
+        this.properties = properties;
     }
 
     @Override
@@ -62,7 +64,7 @@ public class DbExportServiceImpl implements IDbExportService {
         long estimated = -1;
         try (Connection connection = connectionManager.getConnection(conn);
              Statement stmt = connection.createStatement()) {
-            stmt.setQueryTimeout(EXPORT_TIMEOUT_SECONDS);
+            stmt.setQueryTimeout(properties.getExportTimeoutSeconds());
             try (ResultSet rs = stmt.executeQuery(trimSql)) {
                 ResultSetMetaData meta = rs.getMetaData();
                 int colCount = meta.getColumnCount();
@@ -78,7 +80,7 @@ public class DbExportServiceImpl implements IDbExportService {
         // 估算行数: COUNT 包装(失败不阻断, 返回 -1)
         try (Connection connection = connectionManager.getConnection(conn);
              Statement stmt = connection.createStatement()) {
-            stmt.setQueryTimeout(EXPORT_TIMEOUT_SECONDS);
+            stmt.setQueryTimeout(properties.getExportTimeoutSeconds());
             try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) AS c FROM (" + trimSql + ") t")) {
                 if (rs.next()) {
                     estimated = rs.getLong(1);
@@ -104,7 +106,7 @@ public class DbExportServiceImpl implements IDbExportService {
         long exported = 0;
         try (Connection connection = connectionManager.getConnection(conn);
              Statement stmt = connection.createStatement()) {
-            stmt.setQueryTimeout(EXPORT_TIMEOUT_SECONDS);
+            stmt.setQueryTimeout(properties.getExportTimeoutSeconds());
             stmt.setFetchSize(1000);
             try (ResultSet rs = stmt.executeQuery(trimSql)) {
                 ResultSetMetaData meta = rs.getMetaData();
@@ -134,6 +136,10 @@ public class DbExportServiceImpl implements IDbExportService {
                     }
                     first = false;
                     exported++;
+                    // 周期性 flush: 避免大结果导出时 Writer 缓冲持续膨胀(如 10 万行 JSON)
+                    if (exported % 1000 == 0) {
+                        writer.flush();
+                    }
                 }
                 if ("json".equals(fmt)) {
                     writer.write("]");

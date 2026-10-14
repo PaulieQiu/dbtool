@@ -4,6 +4,8 @@ import pan.dromara.dbtool.domain.DbConn;
 import pan.dromara.dbtool.ssh.SshTunnelService;
 
 import cn.hutool.core.util.StrUtil;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.extern.slf4j.Slf4j;
@@ -26,7 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 数据库连接池管理器
@@ -43,38 +45,43 @@ public class DbConnectionManager {
     private final SshTunnelService sshTunnelService;
     private final Neo4jDriverManager neo4jDriverManager;
     private final DbTransactionSessionRegistry transactionSessionRegistry;
+    private final RedisConnectionPool redisPool;
 
     public DbConnectionManager(DbDriverManager driverManager, SshTunnelService sshTunnelService,
                                Neo4jDriverManager neo4jDriverManager,
-                               DbTransactionSessionRegistry transactionSessionRegistry) {
+                               DbTransactionSessionRegistry transactionSessionRegistry,
+                               RedisConnectionPool redisPool) {
         this.driverManager = driverManager;
         this.sshTunnelService = sshTunnelService;
         this.neo4jDriverManager = neo4jDriverManager;
         this.transactionSessionRegistry = transactionSessionRegistry;
+        this.redisPool = redisPool;
     }
 
     /**
      * 连接池缓存 (connId -> DataSource)
+     * <p>带容量上限(100)与空闲淘汰(30 分钟未访问即淘汰), 避免长期不用的连接池常驻内存导致泄漏;
+     * 淘汰/显式移除时通过 removalListener 自动关闭 HikariDataSource(isClosed 幂等防重复关闭)。</p>
      */
-    private final Map<Long, HikariDataSource> poolCache = new ConcurrentHashMap<>();
+    private final com.github.benmanes.caffeine.cache.Cache<Long, HikariDataSource> poolCache =
+        Caffeine.<Long, HikariDataSource>newBuilder()
+            .maximumSize(100)
+            .expireAfterAccess(30, TimeUnit.MINUTES)
+            .removalListener((Long connId, HikariDataSource ds,
+                com.github.benmanes.caffeine.cache.RemovalCause cause) -> {
+                if (ds != null && !ds.isClosed()) {
+                    ds.close();
+                    log.info("数据库连接池缓存淘汰/移除并关闭: connId={}, cause={}", connId, cause);
+                }
+            })
+            .build();
 
     /**
-     * 获取数据源(缓存命中或新建)
+     * 获取数据源(缓存命中或新建; Caffeine 原子保证同 key 并发只创建一个池)
      */
     public HikariDataSource getDataSource(DbConn conn) {
         Long id = conn.getId();
-        HikariDataSource ds = poolCache.get(id);
-        if (ds == null || ds.isClosed()) {
-            synchronized (this) {
-                ds = poolCache.get(id);
-                if (ds == null || ds.isClosed()) {
-                    ds = createDataSource(conn);
-                    poolCache.put(id, ds);
-                    log.info("数据库连接池创建: connId={}, connName={}", id, conn.getConnName());
-                }
-            }
-        }
-        return ds;
+        return poolCache.get(id, k -> createDataSource(conn));
     }
 
     /**
@@ -411,26 +418,23 @@ public class DbConnectionManager {
      * @param args 命令及参数, 如 SCAN/0/COUNT/500、TYPE/key
      */
     public List<String> redisCommand(DbConn conn, String db, String... args) {
-        Endpoint endpoint = resolveEndpoint(conn);
-        int port = endpoint.port == null ? 6379 : endpoint.port;
-        try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(endpoint.host, port), 5000);
-            socket.setSoTimeout(8000);
+        // 纵深防御: 只读连接仅允许只读命令, 防止绕过上层权限直接对只读连接下发写命令(如 FLUSHALL/DEL/CONFIG SET)
+        if (args != null && args.length > 0 && DbAccessPolicy.isReadOnly(conn)
+            && !DbAccessPolicy.isReadOnlyRedisCommand(args[0])) {
+            throw new ServiceException("只读 Redis 连接仅允许执行只读命令(如 SCAN/GET/TYPE/TTL 等), 写入操作已被拒绝");
+        }
+        Socket socket = null;
+        try {
+            socket = borrowRedis(conn, db);
             BufferedInputStream in = new BufferedInputStream(socket.getInputStream());
             BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream());
-            String password = DbConnCrypto.decrypt(conn.getPassword());
-            if (StrUtil.isNotBlank(password)) {
-                writeRedisCommand(out, "AUTH", password);
-                readRedisReply(in);
-            }
-            if (StrUtil.isNotBlank(db)) {
-                writeRedisCommand(out, "SELECT", db);
-                readRedisReply(in);
-            }
             writeRedisCommand(out, args);
+            out.flush();
             return parseRedisReply(in);
         } catch (IOException e) {
             throw new RuntimeException("Redis 命令执行失败: " + e.getMessage(), e);
+        } finally {
+            releaseRedis(conn, db, socket);
         }
     }
 
@@ -501,7 +505,8 @@ public class DbConnectionManager {
      * 关闭并移除连接池
      */
     public void close(Long connId) {
-        HikariDataSource ds = poolCache.remove(connId);
+        // 从缓存移除并同步关闭池(asMap().remove 触发 removalListener 异步再关, isClosed 幂等防重复)
+        HikariDataSource ds = poolCache.asMap().remove(connId);
         if (ds != null && !ds.isClosed()) {
             ds.close();
             log.info("数据库连接池关闭: connId={}", connId);
@@ -512,13 +517,52 @@ public class DbConnectionManager {
         neo4jDriverManager.close(connId);
         // 级联关闭 SSH 隧道(连接编辑/删除/池关闭路径)
         sshTunnelService.closeTunnel(connId);
+        // 清理该连接的空闲 Redis 连接(连接编辑/删除路径)
+        redisPool.close(connId);
+    }
+
+    /**
+     * 连接池健康状态(供 /dbtool/health 监控端点): 汇总活跃/空闲/总连接数 + 各池明细
+     */
+    public java.util.Map<String, Object> poolStats() {
+        java.util.Map<String, Object> stats = new java.util.LinkedHashMap<>();
+        long active = 0, idle = 0, total = 0, awaiting = 0;
+        java.util.List<java.util.Map<String, Object>> pools = new java.util.ArrayList<>();
+        for (java.util.Map.Entry<Long, HikariDataSource> e : poolCache.asMap().entrySet()) {
+            HikariDataSource ds = e.getValue();
+            if (ds == null || ds.isClosed()) {
+                continue;
+            }
+            // 通过 getHikariPoolMXBean 获取池监控接口(提供活跃/空闲/总连接数统计)
+            com.zaxxer.hikari.HikariPoolMXBean pool = ds.getHikariPoolMXBean();
+            java.util.Map<String, Object> p = new java.util.LinkedHashMap<>();
+            p.put("connId", e.getKey());
+            p.put("activeConnections", pool.getActiveConnections());
+            p.put("idleConnections", pool.getIdleConnections());
+            p.put("totalConnections", pool.getTotalConnections());
+            p.put("threadsAwaitingConnection", pool.getThreadsAwaitingConnection());
+            pools.add(p);
+            active += pool.getActiveConnections();
+            idle += pool.getIdleConnections();
+            total += pool.getTotalConnections();
+            awaiting += pool.getThreadsAwaitingConnection();
+        }
+        stats.put("poolCount", pools.size());
+        stats.put("activeConnections", active);
+        stats.put("idleConnections", idle);
+        stats.put("totalConnections", total);
+        stats.put("threadsAwaitingConnection", awaiting);
+        stats.put("pools", pools);
+        return stats;
     }
 
     /**
      * 读取 Redis 原始字节值(GET, 保留任意二进制, 用于二进制内容查看/编辑)
      */
     public byte[] redisBytes(DbConn conn, String db, String key) {
-        try (Socket socket = openRedisSocket(conn, db)) {
+        Socket socket = null;
+        try {
+            socket = borrowRedis(conn, db);
             BufferedInputStream in = new BufferedInputStream(socket.getInputStream());
             BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream());
             writeRedisCommand(out, "GET", key);
@@ -526,6 +570,8 @@ public class DbConnectionManager {
             return readBulkBytes(in);
         } catch (IOException e) {
             throw new RuntimeException("Redis 读取失败: " + e.getMessage(), e);
+        } finally {
+            releaseRedis(conn, db, socket);
         }
     }
 
@@ -533,7 +579,9 @@ public class DbConnectionManager {
      * 写入 Redis 原始字节值(SET, 保留任意二进制)
      */
     public void redisSetBytes(DbConn conn, String db, String key, byte[] value) {
-        try (Socket socket = openRedisSocket(conn, db)) {
+        Socket socket = null;
+        try {
+            socket = borrowRedis(conn, db);
             BufferedInputStream in = new BufferedInputStream(socket.getInputStream());
             BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream());
             byte[] kb = key.getBytes(StandardCharsets.UTF_8);
@@ -551,7 +599,36 @@ public class DbConnectionManager {
             readRedisReply(in);
         } catch (IOException e) {
             throw new RuntimeException("Redis 写入失败: " + e.getMessage(), e);
+        } finally {
+            releaseRedis(conn, db, socket);
         }
+    }
+
+    /**
+     * 从连接池借用 Redis 连接(优先复用空闲连接; 无则新建并完成 AUTH/SELECT);
+     * 复用的连接若上次 SELECT 的 db 不同, 自动切换。
+     */
+    private Socket borrowRedis(DbConn conn, String db) throws IOException {
+        RedisConnectionPool.Entry e = redisPool.borrow(conn.getId());
+        if (e == null) {
+            return openRedisSocket(conn, db);
+        }
+        if (!java.util.Objects.equals(e.db, db)) {
+            BufferedOutputStream out = new BufferedOutputStream(e.socket.getOutputStream());
+            writeRedisCommand(out, "SELECT", db);
+            out.flush();
+            readRedisReply(e.socket.getInputStream());
+            e.db = db;
+        }
+        return e.socket;
+    }
+
+    /** 归还 Redis 连接到池(失败/异常时 socket 已不干净, 直接关闭更安全) */
+    private void releaseRedis(DbConn conn, String db, Socket socket) {
+        if (socket == null || socket.isClosed()) {
+            return;
+        }
+        redisPool.release(conn.getId(), new RedisConnectionPool.Entry(socket, db));
     }
 
     private Socket openRedisSocket(DbConn conn, String db) throws IOException {
