@@ -8,6 +8,7 @@ import cn.dev33.satoken.exception.NotPermissionException;
 import cn.dev33.satoken.stp.StpUtil;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.core.exception.ServiceException;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -75,12 +76,12 @@ public class RedisController {
     @SaCheckPermission("dbtool:meta:edit")
     @PostMapping("/set")
     public R<Void> set(@RequestBody Map<String, Object> body) {
-        Long connId = Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = reqConnId(body);
         String db = body.get("db") == null ? null : String.valueOf(body.get("db"));
         String key = (String) body.get("key");
         String type = (String) body.get("type");
         String value = (String) body.get("value");
-        Long ttl = body.get("ttl") == null ? null : Long.valueOf(String.valueOf(body.get("ttl")));
+        Long ttl = reqLongOrNull(body.get("ttl"));
         @SuppressWarnings("unchecked")
         List<Map<String, String>> fields = (List<Map<String, String>>) body.get("fields");
         metaService.redisSet(connId, db, key, type, value, ttl, fields);
@@ -93,7 +94,7 @@ public class RedisController {
     @SaCheckPermission("dbtool:meta:edit")
     @PostMapping("/del")
     public R<Void> del(@RequestBody Map<String, Object> body) {
-        Long connId = Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = reqConnId(body);
         String db = body.get("db") == null ? null : String.valueOf(body.get("db"));
         @SuppressWarnings("unchecked")
         List<String> keys = (List<String>) body.get("keys");
@@ -107,10 +108,10 @@ public class RedisController {
     @SaCheckPermission("dbtool:meta:edit")
     @PostMapping("/expire")
     public R<Void> expire(@RequestBody Map<String, Object> body) {
-        Long connId = Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = reqConnId(body);
         String db = body.get("db") == null ? null : String.valueOf(body.get("db"));
         String key = (String) body.get("key");
-        Long ttl = Long.valueOf(String.valueOf(body.get("ttl")));
+        Long ttl = reqLong(body.get("ttl"));
         metaService.redisExpire(connId, db, key, ttl);
         return R.ok();
     }
@@ -131,12 +132,49 @@ public class RedisController {
     @SaCheckPermission("dbtool:meta:list")
     @PostMapping("/cli")
     public R<Object> cli(@RequestBody Map<String, Object> body) {
-        Long connId = Long.valueOf(String.valueOf(body.get("connId")));
+        Long connId = reqConnId(body);
         String db = body.get("db") == null ? null : String.valueOf(body.get("db"));
         String command = (String) body.get("command");
         if (!DbAccessPolicy.isReadOnlyRedisCommand(command) && !StpUtil.hasPermission("dbtool:meta:edit")) {
             throw new NotPermissionException("执行写入 Redis 命令需要 dbtool:meta:edit 权限");
         }
         return R.ok(metaService.redisCli(connId, db, command));
+    }
+
+    /** 安全解析请求体中的 connId: 缺失或格式非法抛中文 ServiceException(避免 NumberFormatException 500) */
+    private static Long reqConnId(Map<String, ?> body) {
+        Object v = body == null ? null : body.get("connId");
+        if (v == null || String.valueOf(v).trim().isEmpty()) {
+            throw new ServiceException("connId 不能为空");
+        }
+        try {
+            return Long.valueOf(String.valueOf(v).trim());
+        } catch (NumberFormatException e) {
+            throw new ServiceException("connId 参数格式不正确: " + v);
+        }
+    }
+
+    /** 安全解析可选 Long 参数: 缺失/空返回 null; 格式非法抛中文 ServiceException */
+    private static Long reqLongOrNull(Object v) {
+        if (v == null || String.valueOf(v).trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return Long.valueOf(String.valueOf(v).trim());
+        } catch (NumberFormatException e) {
+            throw new ServiceException("参数格式不正确: " + v);
+        }
+    }
+
+    /** 安全解析必填 Long 参数: 缺失或格式非法抛中文 ServiceException */
+    private static Long reqLong(Object v) {
+        if (v == null || String.valueOf(v).trim().isEmpty()) {
+            throw new ServiceException("参数不能为空");
+        }
+        try {
+            return Long.valueOf(String.valueOf(v).trim());
+        } catch (NumberFormatException e) {
+            throw new ServiceException("参数格式不正确: " + v);
+        }
     }
 }
