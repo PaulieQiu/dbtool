@@ -219,6 +219,8 @@ server {
 
 | 日期 | Commit | 内容 |
 | --- | --- | --- |
+| 2026-10-14 | `b86b897` | **DBX 方言对齐升级**：新增 `DbDialectRegistry` 方言注册中心、`AccessDialectAdapter` / `InformixDialectAdapter`；新增 `DbMetaCache` 元数据缓存、`RedisConnectionPool`、`DbRedisMetaSupport` / `DbEsMetaSupport`；备份模块策略化（`DbBackupStrategy` + MySQL/PostgreSQL 实现）；新增 `DbHealthController` 健康检查与 `DbToolProperties` 配置类；配套单元测试 |
+| 2026-10-13 | `04b323e` | README 补充更新记录章节与 Neo4j 特性行 |
 | 2026-10-13 | `8bce9ae` | **新增 Neo4j 图数据库能力**（Neo4jController / Neo4jService / Neo4jWorkbench.vue，Cypher 查询与节点-关系图可视化）；新增 AI SQL 服务 `AiSqlServiceImpl` 与 SQL LSP 服务 `SqlLspServiceImpl`；修复 Trae 多轮代码审查发现的连接管理 / 备份 / 导出 / 事务会话等问题；补充对应单元测试 |
 | 2026-10-12 | `c2c9c02` | 公开仓库 `application.yml` 密码改回占位符，避免本地凭证泄露 |
 | 2026-10-12 | `bab6133` | 修复雪花算法 Long ID 在前端 JS Number 精度丢失导致工作台 500（Jackson Long → String） |
