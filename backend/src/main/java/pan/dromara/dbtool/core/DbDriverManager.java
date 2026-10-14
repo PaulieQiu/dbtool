@@ -123,7 +123,7 @@ public class DbDriverManager {
             registered.remove(info.getCode().toUpperCase());
             return target;
         } catch (Exception e) {
-            log.error("驱动下载失败", e);
+            log.error("驱动下载失败: {}", e.getMessage());
             throw new RuntimeException("驱动下载失败: " + e.getMessage(), e);
         }
     }

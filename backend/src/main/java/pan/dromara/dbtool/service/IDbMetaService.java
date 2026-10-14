@@ -4,6 +4,8 @@ import pan.dromara.dbtool.domain.DbConn;
 import pan.dromara.dbtool.domain.bo.DbGridChangeBo;
 import pan.dromara.dbtool.domain.vo.DbColumnVo;
 import pan.dromara.dbtool.domain.vo.DbConstraintVo;
+import pan.dromara.dbtool.domain.vo.DbErDiagramVo;
+import pan.dromara.dbtool.domain.vo.DbExplainPlanVo;
 import pan.dromara.dbtool.domain.vo.DbForeignKeyVo;
 import pan.dromara.dbtool.domain.vo.DbGridChangePreviewVo;
 import pan.dromara.dbtool.domain.vo.DbIndexVo;
@@ -210,4 +212,26 @@ public interface IDbMetaService {
      * Excel 多工作表导入(每 sheet 映射一张目标表, 支持新建/追加)
      */
     Map<String, Object> importExcel(Long connId, String schema, List<Map<String, Object>> sheets, org.springframework.web.multipart.MultipartFile file);
+
+    /**
+     * CSV 文件导入(支持创建新表或追加已有表, 表头行推断列名, 剩余行推断类型)
+     */
+    Map<String, Object> importCsv(Long connId, String schema, String tableName, org.springframework.web.multipart.MultipartFile file, String mode, String delimiter);
+
+    /**
+     * JSON 文件导入(支持 JSON 数组格式, 每元素为一个数据行, 键为列名)
+     */
+    Map<String, Object> importJson(Long connId, String schema, String tableName, org.springframework.web.multipart.MultipartFile file, String mode);
+
+    // ==================== ER 图 & 执行计划 ====================
+
+    /**
+     * ER 图数据(表节点 + 外键连线); 表数量超过 200 时截断
+     */
+    DbErDiagramVo erDiagram(Long connId, String schema);
+
+    /**
+     * 查询执行计划(结构化 JSON); MySQL 使用 EXPLAIN FORMAT=JSON, PostgreSQL 使用 EXPLAIN (FORMAT JSON)
+     */
+    DbExplainPlanVo explainPlan(Long connId, String sql);
 }

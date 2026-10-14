@@ -683,6 +683,20 @@ public class DbConnectionManager {
     }
 
     /**
+     * 关闭指定连接的连接池(强制释放所有连接, 用于运维/排障)
+     */
+    public void closePool(Long connId) {
+        HikariDataSource ds = poolCache.getIfPresent(connId);
+        if (ds != null) {
+            poolCache.invalidate(connId);
+            if (!ds.isClosed()) {
+                ds.close();
+            }
+            log.info("手动关闭连接池: connId={}", connId);
+        }
+    }
+
+    /**
      * 获取指定连接
      */
     public Connection getConnection(DbConn conn) {

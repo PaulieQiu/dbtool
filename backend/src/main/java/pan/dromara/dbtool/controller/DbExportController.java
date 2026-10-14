@@ -46,41 +46,69 @@ public class DbExportController {
     @SaCheckPermission("dbtool:meta:list")
     @PostMapping("/preview")
     public R<Map<String, Object>> preview(@RequestBody Map<String, Object> body) {
-        Long connId = body == null ? null : Long.valueOf(String.valueOf(body.get("connId")));
-        String sql = body == null ? null : String.valueOf(body.get("sql"));
-        if (connId == null || StrUtil.isBlank(sql)) {
+        Object connIdRaw = body == null ? null : body.get("connId");
+        Object sqlRaw = body == null ? null : body.get("sql");
+        if (connIdRaw == null || sqlRaw == null) {
+            return R.fail("connId 与 sql 不能为空");
+        }
+        Long connId = Long.valueOf(String.valueOf(connIdRaw));
+        String sql = String.valueOf(sqlRaw);
+        if (StrUtil.isBlank(sql)) {
             return R.fail("connId 与 sql 不能为空");
         }
         return R.ok(exportService.preview(connId, sql));
     }
 
     /**
-     * 流式导出下载(CSV 带 UTF-8 BOM 兼容 Excel)
+     * 流式导出下载(CSV/JSON/SQL 文本格式 + Excel xlsx 二进制格式)
      */
     @SaCheckPermission("dbtool:meta:list")
     @PostMapping("/download")
     public ResponseEntity<StreamingResponseBody> download(@RequestBody Map<String, Object> body) {
-        Long connId = body == null ? null : Long.valueOf(String.valueOf(body.get("connId")));
-        String sql = body == null ? null : String.valueOf(body.get("sql"));
-        String format = body == null ? null : String.valueOf(body.get("format"));
-        long maxRows = body == null || body.get("maxRows") == null ? 100000L : Long.parseLong(String.valueOf(body.get("maxRows")));
+        Object connIdRaw = body == null ? null : body.get("connId");
+        Object sqlRaw = body == null ? null : body.get("sql");
+        if (connIdRaw == null || sqlRaw == null) {
+            return ResponseEntity.badRequest().build();
+        }
+        Long connId = Long.valueOf(String.valueOf(connIdRaw));
+        String sql = String.valueOf(sqlRaw);
+        String format = body == null || body.get("format") == null ? null : String.valueOf(body.get("format"));
+        long maxRows = 100000L;
+        Object maxRowsRaw = body == null ? null : body.get("maxRows");
+        if (maxRowsRaw != null) {
+            try {
+                maxRows = Long.parseLong(String.valueOf(maxRowsRaw));
+            } catch (NumberFormatException ignored) {
+                // 使用默认值
+            }
+        }
         String finalFormat = StrUtil.blankToDefault(format, "csv");
+        // maxRows 可能被上面 try 二次赋值, 复制为 final 变量供 lambda 安全引用
+        final long effectiveMaxRows = maxRows;
         if (connId == null || StrUtil.isBlank(sql)) {
             return ResponseEntity.badRequest().build();
         }
-        String ext = "json".equals(finalFormat) ? "json" : "sql".equals(finalFormat) ? "sql" : "csv";
+        boolean isExcel = "xlsx".equalsIgnoreCase(finalFormat) || "excel".equalsIgnoreCase(finalFormat);
+        String ext = isExcel ? "xlsx" : "json".equals(finalFormat) ? "json" : "sql".equals(finalFormat) ? "sql" : "csv";
         String fileName = "export_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss")) + "." + ext;
+        MediaType contentType = isExcel
+            ? MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            : MediaType.APPLICATION_OCTET_STREAM;
         StreamingResponseBody stream = outputStream -> {
-            Writer writer = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
-            if ("csv".equals(finalFormat)) {
-                writer.write("\uFEFF");
+            if (isExcel) {
+                exportService.exportToExcel(connId, sql, effectiveMaxRows, outputStream);
+            } else {
+                Writer writer = new BufferedWriter(new OutputStreamWriter(outputStream, StandardCharsets.UTF_8));
+                if ("csv".equals(finalFormat)) {
+                    writer.write("\uFEFF");
+                }
+                exportService.exportTo(connId, sql, finalFormat, effectiveMaxRows, writer);
+                writer.flush();
             }
-            exportService.exportTo(connId, sql, finalFormat, maxRows, writer);
-            writer.flush();
         };
         return ResponseEntity.ok()
             .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + fileName + "\"")
-            .contentType(MediaType.APPLICATION_OCTET_STREAM)
+            .contentType(contentType)
             .body(stream);
     }
 

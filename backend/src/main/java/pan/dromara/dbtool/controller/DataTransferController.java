@@ -3,6 +3,7 @@ package pan.dromara.dbtool.controller;
 import pan.dromara.dbtool.service.IDbMetaService;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import lombok.RequiredArgsConstructor;
 import org.apache.poi.ss.usermodel.Cell;
@@ -27,8 +28,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 数据迁移 & Excel 导入 控制器
- * <p>跨库(MySQL/PostgreSQL/Oracle/DM/SQLServer)表数据迁移; Excel 多工作表导入到指定库(新建表/追加已有表)</p>
+ * 数据迁移 & Excel/CSV/JSON 导入 控制器
+ * <p>跨库(MySQL/PostgreSQL/Oracle/DM/SQLServer)表数据迁移; Excel/CSV/JSON 文件导入到指定库(新建表/追加已有表)</p>
  *
  * @author doubao
  */
@@ -137,5 +138,46 @@ public class DataTransferController {
             }
         }
         return R.ok(metaService.importExcel(connId, schema, sheets, file));
+    }
+
+    /**
+     * CSV 文件导入
+     * <p>multipart: file + params(JSON: {connId, schema, tableName, mode:create|append, delimiter})
+     * <br>表头行作为列名, 自动推断类型, 支持逗号/制表符等分隔符</p>
+     */
+    @SaCheckPermission("dbtool:meta:edit")
+    @PostMapping("/csv-import")
+    public R<Map<String, Object>> csvImport(@RequestParam("file") MultipartFile file,
+                                            @RequestParam("params") String params) {
+        cn.hutool.json.JSONObject p = JSONUtil.parseObj(params);
+        Long connId = Long.valueOf(p.getStr("connId"));
+        String schema = p.getStr("schema");
+        String tableName = p.getStr("tableName");
+        String mode = StrUtil.nullToDefault(p.getStr("mode"), "create");
+        String delimiter = p.getStr("delimiter");
+        if (StrUtil.isBlank(tableName)) {
+            throw new ServiceException("目标表名不能为空");
+        }
+        return R.ok(metaService.importCsv(connId, schema, tableName, file, mode, delimiter));
+    }
+
+    /**
+     * JSON 文件导入
+     * <p>multipart: file + params(JSON: {connId, schema, tableName, mode:create|append})
+     * <br>支持 JSON 数组 [{...}, ...] 或单对象 {}, 键为列名</p>
+     */
+    @SaCheckPermission("dbtool:meta:edit")
+    @PostMapping("/json-import")
+    public R<Map<String, Object>> jsonImport(@RequestParam("file") MultipartFile file,
+                                             @RequestParam("params") String params) {
+        cn.hutool.json.JSONObject p = JSONUtil.parseObj(params);
+        Long connId = Long.valueOf(p.getStr("connId"));
+        String schema = p.getStr("schema");
+        String tableName = p.getStr("tableName");
+        String mode = StrUtil.nullToDefault(p.getStr("mode"), "create");
+        if (StrUtil.isBlank(tableName)) {
+            throw new ServiceException("目标表名不能为空");
+        }
+        return R.ok(metaService.importJson(connId, schema, tableName, file, mode));
     }
 }

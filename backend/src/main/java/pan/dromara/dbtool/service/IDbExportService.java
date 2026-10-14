@@ -1,5 +1,6 @@
 package pan.dromara.dbtool.service;
 
+import java.io.OutputStream;
 import java.io.Writer;
 import java.util.List;
 import java.util.Map;
@@ -33,4 +34,15 @@ public interface IDbExportService {
      * 获取导出列信息(SELECT 元数据; 供 INSERT 表名推断)
      */
     List<String> describeColumns(Long connId, String sql);
+
+    /**
+     * 流式导出 Excel(.xlsx); 使用 SXSSFWorkbook 防大结果集 OOM
+     *
+     * @param connId       连接ID
+     * @param sql          查询语句
+     * @param maxRows      行数上限
+     * @param outputStream 输出流
+     * @return 实际导出行数
+     */
+    long exportToExcel(Long connId, String sql, long maxRows, OutputStream outputStream);
 }

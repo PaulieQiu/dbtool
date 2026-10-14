@@ -1,6 +1,8 @@
 package pan.dromara.dbtool.controller;
 
 import pan.dromara.dbtool.domain.vo.DbColumnVo;
+import pan.dromara.dbtool.domain.vo.DbErDiagramVo;
+import pan.dromara.dbtool.domain.vo.DbExplainPlanVo;
 import pan.dromara.dbtool.domain.vo.DbGridChangePreviewVo;
 import pan.dromara.dbtool.domain.DbConn;
 import pan.dromara.dbtool.domain.bo.DbGridChangeBo;
@@ -190,6 +192,27 @@ public class DbMetaController {
                          @RequestParam(required = false) String schema,
                          @RequestParam String table) {
         return R.data(metaService.ddl(connId, schema, table));
+    }
+
+    /**
+     * ER 图数据(表节点 + 外键连线)
+     */
+    @SaCheckPermission("dbtool:meta:list")
+    @GetMapping("/er-diagram")
+    public R<DbErDiagramVo> erDiagram(@RequestParam Long connId,
+                                      @RequestParam(required = false) String schema) {
+        return R.ok(metaService.erDiagram(connId, schema));
+    }
+
+    /**
+     * 查询执行计划(结构化 JSON)
+     */
+    @SaCheckPermission("dbtool:meta:list")
+    @PostMapping("/explain-plan")
+    public R<DbExplainPlanVo> explainPlan(@RequestBody Map<String, Object> body) {
+        Long connId = reqConnId(body);
+        String sql = (String) body.get("sql");
+        return R.ok(metaService.explainPlan(connId, sql));
     }
 
     /**

@@ -30,14 +30,14 @@ import java.util.List;
 public class DbConnServiceImpl implements IDbConnService {
 
     /**
-     * 本地 Redis 数据源参数(启动时自动创建, 可经配置覆盖)
+     * 本地 Redis 数据源参数(启动时自动创建, 按本机环境配置调整)
      */
     private static final String LOCAL_REDIS_NAME = "本地Redis";
     private static final String LOCAL_REDIS_HOST = "127.0.0.1";
     private static final int LOCAL_REDIS_PORT = 6379;
     private static final String LOCAL_REDIS_DB = "0";
 
-    /** 本地 Redis 密码(可经 dbtool.local.redis.password 配置覆盖, 默认占位由本机环境决定) */
+    /** 本地 Redis 密码(可经 dbtool.local.redis.password 配置覆盖, 默认空) */
     @Value("${dbtool.local.redis.password:}")
     private String localRedisPassword;
 

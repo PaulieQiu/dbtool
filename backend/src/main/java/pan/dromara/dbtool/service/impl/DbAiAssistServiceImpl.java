@@ -2,6 +2,7 @@ package pan.dromara.dbtool.service.impl;
 
 import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.core.DbConnCrypto;
+import pan.dromara.dbtool.core.DbConnectionManager;
 import pan.dromara.dbtool.domain.DbConn;
 import pan.dromara.dbtool.domain.vo.DbColumnVo;
 import pan.dromara.dbtool.domain.vo.DbTableVo;
@@ -28,6 +29,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * AI SQL 助手实现(P5): 离线元数据驱动, 不依赖外部大模型
@@ -58,6 +60,7 @@ public class DbAiAssistServiceImpl implements IDbAiAssistService {
 
     private final IDbMetaService metaService;
     private final JdbcTemplate jdbcTemplate;
+    private final DbConnectionManager connectionManager;
 
     /** AI/MCP 允许访问的连接白名单(逗号分隔 connId); 空 = 默认拒绝所有连接(安全默认) */
     @Value("${dbtool.ai.allowConns:}")
@@ -248,6 +251,68 @@ public class DbAiAssistServiceImpl implements IDbAiAssistService {
                 + "    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'\n"
                 + ") COMMENT='新表';";
         }
+        // 聚合查询: SUM/AVG/MAX/MIN/GROUP BY
+        if (lower.contains("求和") || lower.contains("总和") || lower.contains("sum") || lower.contains("合计")) {
+            String numCol = findNumericCol(cols);
+            return "SELECT SUM(" + numCol + ") AS total FROM " + schemaPrefixed + ";";
+        }
+        if (lower.contains("平均") || lower.contains("avg")) {
+            String numCol = findNumericCol(cols);
+            return "SELECT AVG(" + numCol + ") AS avg_value FROM " + schemaPrefixed + ";";
+        }
+        if (lower.contains("最大") || lower.contains("max")) {
+            String numCol = findNumericCol(cols);
+            return "SELECT MAX(" + numCol + ") AS max_value FROM " + schemaPrefixed + ";";
+        }
+        if (lower.contains("最小") || lower.contains("min")) {
+            String numCol = findNumericCol(cols);
+            return "SELECT MIN(" + numCol + ") AS min_value FROM " + schemaPrefixed + ";";
+        }
+        if (lower.contains("分组") || lower.contains("group by") || lower.contains("按...分组") || lower.contains("每组")) {
+            String groupCol = findGroupableCol(cols);
+            return "SELECT " + groupCol + ", COUNT(*) AS cnt FROM " + schemaPrefixed + " GROUP BY " + groupCol + ";";
+        }
+        // 时间范围查询
+        if (lower.contains("今天") || lower.contains("今日")) {
+            String dateCol = findDateCol(cols);
+            return "SELECT * FROM " + schemaPrefixed + " WHERE DATE(" + dateCol + ") = CURDATE() LIMIT 100;";
+        }
+        if (lower.contains("昨天") || lower.contains("昨日")) {
+            String dateCol = findDateCol(cols);
+            return "SELECT * FROM " + schemaPrefixed + " WHERE DATE(" + dateCol + ") = DATE_SUB(CURDATE(), INTERVAL 1 DAY) LIMIT 100;";
+        }
+        if (lower.contains("本周") || lower.contains("这周")) {
+            String dateCol = findDateCol(cols);
+            return "SELECT * FROM " + schemaPrefixed + " WHERE YEARWEEK(" + dateCol + ") = YEARWEEK(NOW()) LIMIT 100;";
+        }
+        if (lower.contains("本月") || lower.contains("这个月")) {
+            String dateCol = findDateCol(cols);
+            return "SELECT * FROM " + schemaPrefixed + " WHERE YEAR(" + dateCol + ") = YEAR(NOW()) AND MONTH(" + dateCol + ") = MONTH(NOW()) LIMIT 100;";
+        }
+        if (lower.contains("最近") || lower.contains("近几天") || lower.contains("近7天") || lower.contains("近七天")) {
+            String dateCol = findDateCol(cols);
+            return "SELECT * FROM " + schemaPrefixed + " WHERE " + dateCol + " >= DATE_SUB(NOW(), INTERVAL 7 DAY) ORDER BY " + dateCol + " DESC LIMIT 100;";
+        }
+        // 排序与 Top N
+        if (lower.contains("最新") || lower.contains("最近创建") || lower.contains("按时间倒序")) {
+            String dateCol = findDateCol(cols);
+            return "SELECT * FROM " + schemaPrefixed + " ORDER BY " + dateCol + " DESC LIMIT 20;";
+        }
+        if (lower.contains("最旧") || lower.contains("最早")) {
+            String dateCol = findDateCol(cols);
+            return "SELECT * FROM " + schemaPrefixed + " ORDER BY " + dateCol + " ASC LIMIT 20;";
+        }
+        if (lower.contains("前10") || lower.contains("前 10") || lower.contains("top10") || lower.contains("top 10")) {
+            return "SELECT * FROM " + schemaPrefixed + " LIMIT 10;";
+        }
+        if (lower.matches(".*前\\s*\\d+.*")) {
+            String num = lower.replaceAll(".*前\\s*(\\d+).*", "$1");
+            return "SELECT * FROM " + schemaPrefixed + " LIMIT " + num + ";";
+        }
+        // 关联查询提示
+        if (lower.contains("关联") || lower.contains("连接") || lower.contains("join")) {
+            return "-- 关联查询模板(请根据实际外键关系调整 JOIN 条件)\nSELECT a.*, b.*\nFROM " + schemaPrefixed + " a\nINNER JOIN `other_table` b ON a.id = b." + table + "_id\nLIMIT 100;";
+        }
         if (lower.contains("查询") || lower.contains("查一下") || lower.contains("看看") || lower.contains("select") || lower.contains("list")) {
             if (!cols.isEmpty()) {
                 String pick = String.join(", ", cols.subList(0, Math.min(cols.size(), 8)));
@@ -324,6 +389,45 @@ public class DbAiAssistServiceImpl implements IDbAiAssistService {
             sb.append("?");
         }
         return sb.toString();
+    }
+
+    /** 查找第一个数值型列名(用于 SUM/AVG/MAX/MIN) */
+    private String findNumericCol(List<String> cols) {
+        for (String col : cols) {
+            String lower = col.toLowerCase(Locale.ROOT);
+            if (lower.contains("amount") || lower.contains("price") || lower.contains("money")
+                || lower.contains("qty") || lower.contains("quantity") || lower.contains("num")
+                || lower.contains("count") || lower.contains("total") || lower.contains("score")
+                || lower.contains("rate") || lower.contains("percent") || lower.contains("id")) {
+                return "`" + col + "`";
+            }
+        }
+        return cols.isEmpty() ? "col" : "`" + cols.get(0) + "`";
+    }
+
+    /** 查找第一个日期/时间列名(用于时间范围查询) */
+    private String findDateCol(List<String> cols) {
+        for (String col : cols) {
+            String lower = col.toLowerCase(Locale.ROOT);
+            if (lower.contains("time") || lower.contains("date") || lower.contains("created")
+                || lower.contains("updated") || lower.contains("gmt") || lower.contains("modify")) {
+                return "`" + col + "`";
+            }
+        }
+        return cols.isEmpty() ? "created_at" : "`" + cols.get(0) + "`";
+    }
+
+    /** 查找第一个适合分组的列(状态/类型/分类) */
+    private String findGroupableCol(List<String> cols) {
+        for (String col : cols) {
+            String lower = col.toLowerCase(Locale.ROOT);
+            if (lower.contains("status") || lower.contains("type") || lower.contains("category")
+                || lower.contains("level") || lower.contains("state") || lower.contains("kind")
+                || lower.contains("group") || lower.contains("role")) {
+                return "`" + col + "`";
+            }
+        }
+        return cols.isEmpty() ? "col" : "`" + cols.get(0) + "`";
     }
 
     // ================= SQL 解析 =================
@@ -462,7 +566,7 @@ public class DbAiAssistServiceImpl implements IDbAiAssistService {
                     LocalDateTime.now().minusDays(auditRetentionDays));
             }
             if (auditMaxRows > 0) {
-                // 保留最新 auditMaxRows 条(派生表包裹, 规避 MySQL 同表子查询限制)
+                // 保留最新 auditMaxRows 条(派生表包裹, 规避 MySQL 同表子查询的限制)
                 jdbcTemplate.update("""
                     DELETE FROM dbtool_ai_audit
                     WHERE id NOT IN (SELECT id FROM (SELECT id FROM dbtool_ai_audit ORDER BY id DESC LIMIT ?) tmp)
@@ -471,5 +575,137 @@ public class DbAiAssistServiceImpl implements IDbAiAssistService {
         } catch (Exception e) {
             log.warn("AI 审计保留清理失败: {}", e.getMessage());
         }
+    }
+
+    // ================= 审计日志查询 & AI 优化建议 =================
+
+    @Override
+    public Map<String, Object> auditList(Long userId, String action, int pageNum, int pageSize) {
+        int pn = Math.max(pageNum, 1);
+        int ps = Math.min(Math.max(pageSize, 1), 100);
+        int offset = (pn - 1) * ps;
+        StringBuilder where = new StringBuilder(" WHERE 1=1");
+        List<Object> params = new ArrayList<>();
+        if (userId != null) {
+            where.append(" AND user_id = ?");
+            params.add(userId);
+        }
+        if (StrUtil.isNotBlank(action)) {
+            where.append(" AND action = ?");
+            params.add(action);
+        }
+        String whereSql = where.toString();
+        Long total = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM dbtool_ai_audit" + whereSql, Long.class, params.toArray());
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+            "SELECT id, user_id, conn_id, action, tool, input_summary, output_summary, risk_level, created_at FROM dbtool_ai_audit"
+                + whereSql + " ORDER BY id DESC LIMIT ? OFFSET ?",
+            Stream.concat(params.stream(), Stream.of(ps, offset)).toArray());
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("total", total == null ? 0 : total);
+        result.put("pageNum", pn);
+        result.put("pageSize", ps);
+        result.put("rows", rows);
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> optimize(Long connId, String sql, Long userId) {
+        if (StrUtil.isBlank(sql)) {
+            throw new ServiceException("SQL 不能为空");
+        }
+        DbConn conn = requireAllowed(connId);
+        String normalized = DbAccessPolicy.normalizeLeadingComments(sql).trim();
+        if (normalized.isEmpty()) {
+            throw new ServiceException("SQL 内容为空");
+        }
+        List<String> suggestions = new ArrayList<>();
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        // 规则 1: 无 LIMIT 的 SELECT 建议加
+        if (lower.startsWith("select") && !lower.contains("limit")) {
+            suggestions.add("查询未带 LIMIT, 大表场景可能全表扫描, 建议添加 LIMIT 限制行数");
+        }
+        // 规则 2: SELECT * 建议指定列
+        if (lower.contains("select *")) {
+            suggestions.add("使用 SELECT * 会查询所有列, 建议明确指定需要的列以减少 IO 和网络传输");
+        }
+        // 规则 3: WHERE 条件中使用函数
+        if (lower.matches(".*where\\s+\\w+\\s*\\(.*\\).*")) {
+            suggestions.add("WHERE 子句中对列使用函数可能导致索引失效, 建议改写为范围查询或使用计算列");
+        }
+        // 规则 4: LIKE 前缀通配符
+        if (lower.contains("like '%") || lower.contains("like '%")) {
+            suggestions.add("LIKE 使用前置通配符(%开头)会导致索引失效, 建议改用全文索引或调整查询方式");
+        }
+        // 规则 5: 隐式类型转换风险
+        if (lower.matches(".*where\\s+\\w+\\s*=\\s*'\\d+'.*")) {
+            suggestions.add("数值列使用字符串比较可能触发隐式类型转换, 导致索引失效, 请使用数值类型比较");
+        }
+        // 规则 6: 子查询 IN 建议改 JOIN
+        if (lower.contains("in (select")) {
+            suggestions.add("IN (SELECT ...) 子查询在大数据量时性能较差, 建议改写为 JOIN");
+        }
+        // 规则 7: ORDER BY 无索引提示
+        if (lower.contains("order by") && !lower.contains("index")) {
+            suggestions.add("ORDER BY 可能触发 filesort, 建议确认排序列已建立索引");
+        }
+        // 规则 8: 多表 JOIN 数量检查
+        int joinCount = lower.split("\\bjoin\\b").length - 1;
+        if (joinCount >= 4) {
+            suggestions.add("JOIN 表数量较多(" + joinCount + " 个), 建议确认关联列已建立索引, 或考虑拆分查询");
+        }
+        // 规则 9: 无 WHERE 的 UPDATE/DELETE
+        if ((lower.startsWith("update") || lower.startsWith("delete")) && !lower.contains("where")) {
+            suggestions.add("高危: UPDATE/DELETE 未带 WHERE 条件将影响全表, 请务必添加 WHERE 过滤");
+        }
+        // 规则 10: 尝试获取 EXPLAIN 信息
+        String explainSuggestion = tryExplainOptimize(connId, normalized);
+        if (explainSuggestion != null) {
+            suggestions.add(explainSuggestion);
+        }
+        audit(userId, connId, "AI_OPTIMIZE", "optimize", StrUtil.maxLength(normalized, 300),
+            "suggestions=" + suggestions.size(), "LOW");
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("sql", normalized);
+        result.put("suggestions", suggestions);
+        result.put("suggestionCount", suggestions.size());
+        result.put("connName", conn.getConnName());
+        return result;
+    }
+
+    /**
+     * 尝试执行 EXPLAIN 并分析结果(仅 MySQL, 其他方言返回 null)
+     * <p>使用目标数据库连接执行 EXPLAIN, 而非应用自身数据源, 避免 SQL 注入风险</p>
+     */
+    private String tryExplainOptimize(Long connId, String sql) {
+        try {
+            DbConn conn = metaService.getConn(connId);
+            if (conn == null || !"MYSQL".equalsIgnoreCase(conn.getDbType())) {
+                return null;
+            }
+            if (!sql.toLowerCase(Locale.ROOT).startsWith("select")) {
+                return null;
+            }
+            String explainSql = "EXPLAIN FORMAT=JSON " + sql;
+            // 使用目标数据库连接执行 EXPLAIN, 避免在应用库上执行用户 SQL
+            try (java.sql.Connection c = connectionManager.getConnection(conn);
+                 java.sql.Statement st = c.createStatement();
+                 ResultSet rs = st.executeQuery(explainSql)) {
+                if (rs.next()) {
+                    String json = rs.getString(1);
+                    if (json.contains("\"using_filesort\": true") || json.contains("\"using_filesort\":true")) {
+                        return "EXPLAIN 显示使用了 filesort, 建议为 ORDER BY 列添加索引";
+                    }
+                    if (json.contains("\"using_temporary\": true") || json.contains("\"using_temporary\":true")) {
+                        return "EXPLAIN 显示使用了临时表, 建议优化 GROUP BY 或 JOIN 条件";
+                    }
+                    if (json.contains("\"type\": \"ALL\"") || json.contains("\"type\":\"ALL\"")) {
+                        return "EXPLAIN 显示存在全表扫描(type=ALL), 建议为 WHERE 条件列添加索引";
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("EXPLAIN 分析跳过: {}", e.getMessage());
+        }
+        return null;
     }
 }

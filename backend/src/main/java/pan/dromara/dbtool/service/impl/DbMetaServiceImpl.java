@@ -31,6 +31,10 @@ import pan.dromara.dbtool.domain.bo.DbGridChangeBo;
 import pan.dromara.dbtool.domain.bo.DbStructureChangeBo;
 import pan.dromara.dbtool.domain.vo.DbColumnVo;
 import pan.dromara.dbtool.domain.vo.DbConstraintVo;
+import pan.dromara.dbtool.domain.vo.DbErDiagramVo;
+import pan.dromara.dbtool.domain.vo.DbErEdgeVo;
+import pan.dromara.dbtool.domain.vo.DbErNodeVo;
+import pan.dromara.dbtool.domain.vo.DbExplainPlanVo;
 import pan.dromara.dbtool.domain.vo.DbForeignKeyVo;
 import pan.dromara.dbtool.domain.vo.DbGridChangePreviewVo;
 import pan.dromara.dbtool.domain.vo.DbIndexVo;
@@ -1917,6 +1921,499 @@ public class DbMetaServiceImpl implements IDbMetaService {
             sb.append(" ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         }
         return sb.toString();
+    }
+
+    // ==================== CSV/JSON 导入 ====================
+
+    @Override
+    public Map<String, Object> importCsv(Long connId, String schema, String tableName,
+                                         org.springframework.web.multipart.MultipartFile file, String mode, String delimiter) {
+        DbConn conn = getConn(connId);
+        DbAccessPolicy.requireWritable(conn);
+        String dbType = StrUtil.nullToDefault(conn.getDbType(), "mysql").toLowerCase();
+        if (StrUtil.isBlank(tableName)) {
+            throw new ServiceException("目标表名不能为空");
+        }
+        String sep = StrUtil.isBlank(delimiter) ? "," : delimiter;
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("table", tableName);
+        result.put("mode", mode);
+        try {
+            String content = new String(file.getBytes(), StandardCharsets.UTF_8);
+            List<List<Object>> rows = parseCsvContent(content, sep);
+            if (rows.size() < 2) {
+                throw new ServiceException("CSV 无有效数据(需表头 + 至少一行)");
+            }
+            List<String> headers = new ArrayList<>();
+            for (Object h : rows.get(0)) {
+                headers.add(h == null ? "col" + (headers.size() + 1) : String.valueOf(h).trim());
+            }
+            List<List<Object>> data = new ArrayList<>(rows.subList(1, rows.size()));
+            List<String> colTypes = inferExcelTypes(headers, data, dbType);
+            if ("create".equals(mode)) {
+                String ddl = buildExcelTable(dbType, schema, tableName, headers, colTypes);
+                try (Connection c = connectionManager.getConnection(conn);
+                     Statement st = c.createStatement()) {
+                    st.execute(ddl);
+                }
+                result.put("ddl", ddl);
+            } else {
+                String tableQ = qname(schema, tableName, dbType);
+                try (Connection c = connectionManager.getConnection(conn);
+                     Statement st = c.createStatement();
+                     ResultSet rs = st.executeQuery("SELECT * FROM " + tableQ + " LIMIT 1")) {
+                    java.sql.ResultSetMetaData md = rs.getMetaData();
+                    Set<String> exists = new LinkedHashSet<>();
+                    for (int i = 1; i <= md.getColumnCount(); i++) {
+                        exists.add(md.getColumnLabel(i).toLowerCase());
+                    }
+                    for (String h : headers) {
+                        if (!exists.contains(h.toLowerCase())) {
+                            throw new ServiceException("目标表缺少列: " + h + " (已有列: " + String.join(",", exists) + ")");
+                        }
+                    }
+                }
+            }
+            int n = insertExcelRows(conn, schema, tableName, headers, data, dbType);
+            result.put("rows", n);
+            result.put("success", true);
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("error", e.getMessage());
+        }
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> importJson(Long connId, String schema, String tableName,
+                                          org.springframework.web.multipart.MultipartFile file, String mode) {
+        DbConn conn = getConn(connId);
+        DbAccessPolicy.requireWritable(conn);
+        String dbType = StrUtil.nullToDefault(conn.getDbType(), "mysql").toLowerCase();
+        if (StrUtil.isBlank(tableName)) {
+            throw new ServiceException("目标表名不能为空");
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("table", tableName);
+        result.put("mode", mode);
+        try {
+            String content = new String(file.getBytes(), StandardCharsets.UTF_8);
+            List<Map<String, Object>> jsonRows = parseJsonContent(content);
+            if (jsonRows.isEmpty()) {
+                throw new ServiceException("JSON 文件无有效数据(需非空数组)");
+            }
+            List<String> headers = new ArrayList<>(jsonRows.get(0).keySet());
+            if (headers.isEmpty()) {
+                throw new ServiceException("JSON 对象无字段名");
+            }
+            List<List<Object>> data = new ArrayList<>();
+            for (Map<String, Object> row : jsonRows) {
+                List<Object> vals = new ArrayList<>();
+                for (String h : headers) {
+                    vals.add(row.get(h));
+                }
+                data.add(vals);
+            }
+            List<String> colTypes = inferExcelTypes(headers, data, dbType);
+            if ("create".equals(mode)) {
+                String ddl = buildExcelTable(dbType, schema, tableName, headers, colTypes);
+                try (Connection c = connectionManager.getConnection(conn);
+                     Statement st = c.createStatement()) {
+                    st.execute(ddl);
+                }
+                result.put("ddl", ddl);
+            } else {
+                String tableQ = qname(schema, tableName, dbType);
+                try (Connection c = connectionManager.getConnection(conn);
+                     Statement st = c.createStatement();
+                     ResultSet rs = st.executeQuery("SELECT * FROM " + tableQ + " LIMIT 1")) {
+                    java.sql.ResultSetMetaData md = rs.getMetaData();
+                    Set<String> exists = new LinkedHashSet<>();
+                    for (int i = 1; i <= md.getColumnCount(); i++) {
+                        exists.add(md.getColumnLabel(i).toLowerCase());
+                    }
+                    for (String h : headers) {
+                        if (!exists.contains(h.toLowerCase())) {
+                            throw new ServiceException("目标表缺少列: " + h + " (已有列: " + String.join(",", exists) + ")");
+                        }
+                    }
+                }
+            }
+            int n = insertExcelRows(conn, schema, tableName, headers, data, dbType);
+            result.put("rows", n);
+            result.put("success", true);
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("error", e.getMessage());
+        }
+        return result;
+    }
+
+    private List<List<Object>> parseCsvContent(String content, String delimiter) {
+        List<List<Object>> rows = new ArrayList<>();
+        java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.StringReader(content));
+        StringBuilder field = new StringBuilder();
+        boolean inQuotes = false;
+        List<Object> currentRow = new ArrayList<>();
+        try {
+            int ch;
+            while ((ch = reader.read()) != -1) {
+                char c = (char) ch;
+                if (inQuotes) {
+                    if (c == '"') {
+                        reader.mark(1);
+                        int next = reader.read();
+                        if (next == '"') {
+                            field.append('"');
+                        } else {
+                            inQuotes = false;
+                            if (next != -1) {
+                                reader.reset();
+                            }
+                        }
+                    } else {
+                        field.append(c);
+                    }
+                } else {
+                    if (c == '"') {
+                        inQuotes = true;
+                    } else if (String.valueOf(c).equals(delimiter)) {
+                        currentRow.add(cleanField(field.toString()));
+                        field.setLength(0);
+                    } else if (c == '\r') {
+                        // skip, handle with \n
+                    } else if (c == '\n') {
+                        currentRow.add(cleanField(field.toString()));
+                        field.setLength(0);
+                        if (!currentRow.isEmpty()) {
+                            rows.add(new ArrayList<>(currentRow));
+                            currentRow.clear();
+                        }
+                    } else {
+                        field.append(c);
+                    }
+                }
+            }
+            // last field and last row
+            if (field.length() > 0 || !currentRow.isEmpty() || inQuotes) {
+                currentRow.add(cleanField(field.toString()));
+                if (!currentRow.isEmpty()) {
+                    rows.add(new ArrayList<>(currentRow));
+                }
+            }
+        } catch (Exception e) {
+            throw new ServiceException("CSV 解析失败: " + e.getMessage());
+        }
+        return rows;
+    }
+
+    private Object cleanField(String s) {
+        if (s == null || s.isEmpty()) {
+            return null;
+        }
+        String trimmed = s.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        // try parse as number
+        try {
+            if (trimmed.contains(".")) {
+                return Double.parseDouble(trimmed);
+            }
+            long l = Long.parseLong(trimmed);
+            if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
+                return (int) l;
+            }
+            return l;
+        } catch (NumberFormatException ignored) {
+        }
+        // try parse as boolean
+        if ("true".equalsIgnoreCase(trimmed)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(trimmed)) {
+            return false;
+        }
+        return trimmed;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> parseJsonContent(String content) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            Object parsed = mapper.readValue(content, Object.class);
+            if (parsed instanceof List) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                for (Object item : (List<?>) parsed) {
+                    if (item instanceof Map) {
+                        rows.add((Map<String, Object>) item);
+                    }
+                }
+                return rows;
+            }
+            if (parsed instanceof Map) {
+                // 单对象包装成数组
+                List<Map<String, Object>> rows = new ArrayList<>();
+                rows.add((Map<String, Object>) parsed);
+                return rows;
+            }
+            throw new ServiceException("JSON 格式不支持(需数组或对象)");
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ServiceException("JSON 解析失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== ER 图 ====================
+
+    @Override
+    public DbErDiagramVo erDiagram(Long connId, String schema) {
+        DbConn conn = getConn(connId);
+        if (isRedis(conn) || isEs(conn)) {
+            throw new ServiceException("ER 图仅支持关系型数据库");
+        }
+        List<DbTableVo> allTables = tables(connId, schema);
+        int total = allTables.size();
+        boolean truncated = false;
+        // 表数量超过 200 时截断保护
+        if (total > 200) {
+            allTables = allTables.subList(0, 200);
+            truncated = true;
+        }
+        Set<String> tableSet = new LinkedHashSet<>();
+        for (DbTableVo t : allTables) {
+            tableSet.add(t.getTableName().toLowerCase(Locale.ROOT));
+        }
+        // 构建节点
+        List<DbErNodeVo> nodes = new ArrayList<>();
+        for (DbTableVo t : allTables) {
+            DbErNodeVo node = new DbErNodeVo();
+            node.setTableName(t.getTableName());
+            node.setComment(t.getTableComment());
+            List<DbColumnVo> cols = columns(connId, schema, t.getTableName());
+            List<DbErNodeVo.ColumnItem> items = new ArrayList<>();
+            for (DbColumnVo c : cols) {
+                DbErNodeVo.ColumnItem item = new DbErNodeVo.ColumnItem();
+                item.setName(c.getColumnName());
+                item.setType(c.getColumnType());
+                item.setPk(Boolean.TRUE.equals(c.getPrimary()) || "PRI".equalsIgnoreCase(c.getColumnKey()));
+                item.setComment(c.getColumnComment());
+                items.add(item);
+            }
+            node.setColumns(items);
+            nodes.add(node);
+        }
+        // 构建外键连线(仅包含两端表都在当前 schema 内的连线)
+        List<DbErEdgeVo> edges = new ArrayList<>();
+        for (DbTableVo t : allTables) {
+            List<DbForeignKeyVo> fks = foreignKeys(connId, schema, t.getTableName());
+            for (DbForeignKeyVo fk : fks) {
+                if (!tableSet.contains(fk.getReferencedTableName().toLowerCase(Locale.ROOT))) {
+                    continue;
+                }
+                DbErEdgeVo edge = new DbErEdgeVo();
+                edge.setFkName(fk.getFkName());
+                edge.setSourceTable(fk.getTableName());
+                edge.setSourceColumn(fk.getColumnName());
+                edge.setTargetTable(fk.getReferencedTableName());
+                edge.setTargetColumn(fk.getReferencedColumnName());
+                edge.setDeleteRule(fk.getDeleteRule());
+                edge.setUpdateRule(fk.getUpdateRule());
+                edges.add(edge);
+            }
+        }
+        DbErDiagramVo vo = new DbErDiagramVo();
+        vo.setNodes(nodes);
+        vo.setEdges(edges);
+        vo.setTotalTableCount(total);
+        vo.setTruncated(truncated);
+        return vo;
+    }
+
+    // ==================== 执行计划 ====================
+
+    @Override
+    public DbExplainPlanVo explainPlan(Long connId, String sql) {
+        if (StrUtil.isBlank(sql)) {
+            throw new ServiceException("SQL 不能为空");
+        }
+        String trimmed = sql.trim();
+        if (!SELECT_PATTERN.matcher(trimmed).find()) {
+            throw new ServiceException("执行计划仅支持 SELECT/SHOW/DESCRIBE/EXPLAIN 语句");
+        }
+        DbConn conn = getConn(connId);
+        String dbType = conn.getDbType() == null ? "" : conn.getDbType().toUpperCase(Locale.ROOT);
+        DbExplainPlanVo vo = new DbExplainPlanVo();
+        vo.setDialect(dbType);
+        if ("MYSQL".equals(dbType) || "MARIADB".equals(dbType)) {
+            explainMysql(conn, trimmed, vo);
+        } else if ("POSTGRESQL".equals(dbType)) {
+            explainPostgres(conn, trimmed, vo);
+        } else {
+            explainGeneric(conn, trimmed, vo);
+        }
+        return vo;
+    }
+
+    private void explainMysql(DbConn conn, String sql, DbExplainPlanVo vo) {
+        String explainSql = "EXPLAIN FORMAT=JSON " + sql;
+        StringBuilder rawText = new StringBuilder();
+        try (Connection c = connectionManager.getConnection(conn);
+             Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery(explainSql)) {
+            while (rs.next()) {
+                rawText.append(rs.getString(1));
+            }
+        } catch (SQLException e) {
+            throw new ServiceException("执行计划获取失败: " + translateSqlError(e.getMessage()));
+        }
+        vo.setRawText(rawText.toString());
+        // 解析 MySQL EXPLAIN FORMAT=JSON 输出
+        try {
+            cn.hutool.json.JSONObject json = new cn.hutool.json.JSONObject(rawText.toString());
+            cn.hutool.json.JSONObject queryBlock = json.getJSONObject("query_block");
+            if (queryBlock != null) {
+                List<DbExplainPlanVo.PlanNode> tree = new ArrayList<>();
+                DbExplainPlanVo.PlanNode root = parseMysqlPlanNode(queryBlock, 1);
+                tree.add(root);
+                vo.setTree(tree);
+            }
+        } catch (Exception e) {
+            log.warn("MySQL EXPLAIN JSON 解析失败, 保留原始文本: {}", e.getMessage());
+        }
+    }
+
+    private DbExplainPlanVo.PlanNode parseMysqlPlanNode(cn.hutool.json.JSONObject block, int id) {
+        DbExplainPlanVo.PlanNode node = new DbExplainPlanVo.PlanNode();
+        node.setId(id);
+        // 解析 select_id
+        if (block.containsKey("select_id")) {
+            node.setId(block.getInt("select_id"));
+        }
+        // 解析 table 信息
+        cn.hutool.json.JSONObject tableObj = block.getJSONObject("table");
+        if (tableObj != null) {
+            node.setTable(tableObj.getStr("table_name"));
+            node.setAccessType(tableObj.getStr("access_type"));
+            node.setPossibleKeys(tableObj.getStr("possible_keys") != null
+                ? List.of(tableObj.getStr("possible_keys").split(",")) : null);
+            node.setKey(tableObj.getStr("key"));
+            node.setKeyLen(tableObj.getInt("key_length"));
+            node.setRef(tableObj.getStr("ref"));
+            node.setRows(tableObj.getLong("rows_examined_per_scan"));
+            node.setCost(tableObj.getDouble("cost"));
+            node.setExtra(tableObj.getStr("attached_condition"));
+            // 全表扫描告警
+            if ("ALL".equalsIgnoreCase(tableObj.getStr("access_type"))) {
+                node.setWarning("全表扫描(" + tableObj.getStr("table_name") + "), 建议添加索引");
+            }
+        }
+        // 解析嵌套的 nested_loop / ordering_operation / grouping_operation 等
+        List<DbExplainPlanVo.PlanNode> children = new ArrayList<>();
+        int childId = id + 1;
+        cn.hutool.json.JSONObject nested = block.getJSONObject("nested_loop");
+        if (nested != null) {
+            cn.hutool.json.JSONArray arr = nested.getJSONArray("ordering_operation");
+            if (arr == null) {
+                // nested_loop 本身包含 table
+                children.add(parseMysqlPlanNode(block, childId++));
+            }
+        }
+        cn.hutool.json.JSONObject ordering = block.getJSONObject("ordering_operation");
+        if (ordering != null) {
+            node.setOperation("SORT");
+            if (ordering.containsKey("nested_loop")) {
+                node.setExtra(node.getExtra() == null ? "Using filesort" : node.getExtra() + "; Using filesort");
+            }
+        }
+        cn.hutool.json.JSONObject grouping = block.getJSONObject("grouping_operation");
+        if (grouping != null) {
+            node.setOperation("GROUP");
+        }
+        node.setChildren(children.isEmpty() ? null : children);
+        return node;
+    }
+
+    private void explainPostgres(DbConn conn, String sql, DbExplainPlanVo vo) {
+        String explainSql = "EXPLAIN (FORMAT JSON) " + sql;
+        StringBuilder rawText = new StringBuilder();
+        try (Connection c = connectionManager.getConnection(conn);
+             Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery(explainSql)) {
+            while (rs.next()) {
+                rawText.append(rs.getString(1));
+            }
+        } catch (SQLException e) {
+            throw new ServiceException("执行计划获取失败: " + translateSqlError(e.getMessage()));
+        }
+        vo.setRawText(rawText.toString());
+        try {
+            cn.hutool.json.JSONArray arr = new cn.hutool.json.JSONArray(rawText.toString());
+            if (!arr.isEmpty()) {
+                cn.hutool.json.JSONObject plan = arr.getJSONObject(0).getJSONObject("Plan");
+                if (plan != null) {
+                    List<DbExplainPlanVo.PlanNode> tree = new ArrayList<>();
+                    tree.add(parsePgPlanNode(plan, 1));
+                    vo.setTree(tree);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("PostgreSQL EXPLAIN JSON 解析失败, 保留原始文本: {}", e.getMessage());
+        }
+    }
+
+    private DbExplainPlanVo.PlanNode parsePgPlanNode(cn.hutool.json.JSONObject plan, int id) {
+        DbExplainPlanVo.PlanNode node = new DbExplainPlanVo.PlanNode();
+        node.setId(id);
+        node.setOperation(plan.getStr("Node Type"));
+        node.setTable(plan.getStr("Relation Name"));
+        node.setCost(plan.getDouble("Total Cost"));
+        node.setRows(plan.getLong("Plan Rows"));
+        String accessType = plan.getStr("Index Name") != null ? "index" : plan.getStr("Node Type");
+        node.setAccessType(accessType);
+        // 全表扫描告警
+        if ("Seq Scan".equals(plan.getStr("Node Type"))) {
+            node.setWarning("全表扫描(" + plan.getStr("Relation Name") + "), 建议添加索引");
+        }
+        // 递归解析子节点
+        cn.hutool.json.JSONArray plans = plan.getJSONArray("Plans");
+        if (plans != null && !plans.isEmpty()) {
+            List<DbExplainPlanVo.PlanNode> children = new ArrayList<>();
+            for (int i = 0; i < plans.size(); i++) {
+                children.add(parsePgPlanNode(plans.getJSONObject(i), id + i + 1));
+            }
+            node.setChildren(children);
+        }
+        return node;
+    }
+
+    private void explainGeneric(DbConn conn, String sql, DbExplainPlanVo vo) {
+        // 通用回退: 执行普通 EXPLAIN 并返回文本
+        String explainSql = "EXPLAIN " + sql;
+        StringBuilder rawText = new StringBuilder();
+        try (Connection c = connectionManager.getConnection(conn);
+             Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery(explainSql)) {
+            ResultSetMetaData meta = rs.getMetaData();
+            int colCount = meta.getColumnCount();
+            while (rs.next()) {
+                for (int i = 1; i <= colCount; i++) {
+                    if (i > 1) {
+                        rawText.append('\t');
+                    }
+                    rawText.append(rs.getString(i));
+                }
+                rawText.append('\n');
+            }
+        } catch (SQLException e) {
+            throw new ServiceException("执行计划获取失败: " + translateSqlError(e.getMessage()));
+        }
+        vo.setRawText(rawText.toString());
     }
 
     private int insertExcelRows(DbConn conn, String schema, String table, List<String> headers,

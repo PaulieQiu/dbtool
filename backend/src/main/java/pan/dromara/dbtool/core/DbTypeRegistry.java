@@ -371,13 +371,6 @@ public class DbTypeRegistry {
             caps.add("verified");
             return caps;
         }
-        // Neo4j: 图数据库专属能力(Cypher 查询 + 图/Schema 浏览)
-        if ("NEO4J".equals(c)) {
-            caps.add("query");
-            caps.add("browse");
-            caps.add("verified");
-            return caps;
-        }
         DbTypeInfo info = REGISTRY.get(c);
         // 有方言适配器(DIALECT_ADAPTED)的类型, 不论 SQL/分析型等分类, 均可浏览/DDL/方言查询;
         // 仅无方言适配器的 SQL 类额外提供基础查询; 非 SQL 且无方言的类型保持仅 connect。

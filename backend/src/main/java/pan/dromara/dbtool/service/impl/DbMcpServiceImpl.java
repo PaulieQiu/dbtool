@@ -2,6 +2,8 @@ package pan.dromara.dbtool.service.impl;
 
 import pan.dromara.dbtool.core.DbAccessPolicy;
 import pan.dromara.dbtool.domain.vo.DbColumnVo;
+import pan.dromara.dbtool.domain.vo.DbForeignKeyVo;
+import pan.dromara.dbtool.domain.vo.DbIndexVo;
 import pan.dromara.dbtool.domain.vo.DbResultVo;
 import pan.dromara.dbtool.domain.vo.DbTableVo;
 import pan.dromara.dbtool.service.IDbMcpService;
@@ -84,6 +86,14 @@ public class DbMcpServiceImpl implements IDbMcpService {
             arg("connId", "integer", true), arg("schema", "string", true), arg("table", "string", true))));
         tools.add(tool("get_ddl", "获取建表 DDL", List.of(
             arg("connId", "integer", true), arg("schema", "string", true), arg("table", "string", true))));
+        tools.add(tool("list_indexes", "列出表的索引信息", List.of(
+            arg("connId", "integer", true), arg("schema", "string", true), arg("table", "string", true))));
+        tools.add(tool("list_foreign_keys", "列出表的外键关系", List.of(
+            arg("connId", "integer", true), arg("schema", "string", true), arg("table", "string", true))));
+        tools.add(tool("search_tables", "按名称/注释模糊搜索表", List.of(
+            arg("connId", "integer", true), arg("schema", "string", true), arg("keyword", "string", true))));
+        tools.add(tool("optimize_sql", "AI SQL 优化建议", List.of(
+            arg("connId", "integer", true), arg("sql", "string", true))));
         tools.add(tool("run_readonly_query", "执行只读查询(仅 SELECT/SHOW/DESC/EXPLAIN, 强制 LIMIT 100)", List.of(
             arg("connId", "integer", true), arg("sql", "string", true))));
         tools.add(tool("explain_sql", "解释 SQL(类型/涉及表/风险)", List.of(
@@ -104,6 +114,10 @@ public class DbMcpServiceImpl implements IDbMcpService {
             case "list_tables" -> content = listTables(connId, str(args.get("schema")));
             case "describe_table" -> content = describeTable(connId, str(args.get("schema")), str(args.get("table")));
             case "get_ddl" -> content = getDdl(connId, str(args.get("schema")), str(args.get("table")));
+            case "list_indexes" -> content = listIndexes(connId, str(args.get("schema")), str(args.get("table")));
+            case "list_foreign_keys" -> content = listForeignKeys(connId, str(args.get("schema")), str(args.get("table")));
+            case "search_tables" -> content = searchTables(connId, str(args.get("schema")), str(args.get("keyword")));
+            case "optimize_sql" -> content = optimizeSql(connId, str(args.get("sql")), userId);
             case "run_readonly_query" -> content = runReadonlyQuery(connId, str(args.get("sql")), userId);
             case "explain_sql" -> content = explainSql(connId, str(args.get("sql")), userId);
             default -> throw new McpException(-32602, "工具不存在: " + name);
@@ -189,6 +203,76 @@ public class DbMcpServiceImpl implements IDbMcpService {
             + "\n风险: " + explained.get("riskLevel")
             + (explained.get("warning") == null ? "" : "\n警示: " + explained.get("warning"))
             + "\n涉及表: " + String.join(", ", (List<String>) explained.get("tables")));
+    }
+
+    private Map<String, Object> listIndexes(Long connId, String schema, String table) {
+        requireSchema(schema);
+        requireTable(table);
+        StringBuilder sb = new StringBuilder("table=" + table + "\n");
+        for (DbIndexVo idx : metaService.indexes(connId, schema, table)) {
+            sb.append(idx.getIndexName()).append('\t')
+                .append(idx.getNonUnique() != null && idx.getNonUnique() == 1 ? "NON_UNIQUE" : "UNIQUE")
+                .append('\t').append(idx.getColumnName() == null ? "" : idx.getColumnName())
+                .append('\n');
+        }
+        return textContent(sb.toString());
+    }
+
+    private Map<String, Object> listForeignKeys(Long connId, String schema, String table) {
+        requireSchema(schema);
+        requireTable(table);
+        StringBuilder sb = new StringBuilder("table=" + table + "\n");
+        for (DbForeignKeyVo fk : metaService.foreignKeys(connId, schema, table)) {
+            sb.append(fk.getFkName()).append('\t')
+                .append(fk.getColumnName()).append(" -> ")
+                .append(fk.getReferencedTableName()).append('.').append(fk.getReferencedColumnName())
+                .append('\n');
+        }
+        return textContent(sb.toString());
+    }
+
+    private Map<String, Object> searchTables(Long connId, String schema, String keyword) {
+        requireSchema(schema);
+        if (StrUtil.isBlank(keyword)) {
+            throw new McpException(-32602, "缺少参数: keyword");
+        }
+        String kw = keyword.toLowerCase();
+        StringBuilder sb = new StringBuilder("keyword=" + keyword + "\n");
+        int count = 0;
+        for (DbTableVo t : metaService.tables(connId, schema)) {
+            if (t.getTableName().toLowerCase().contains(kw)
+                || (t.getTableComment() != null && t.getTableComment().toLowerCase().contains(kw))) {
+                sb.append(t.getTableName());
+                if (StrUtil.isNotBlank(t.getTableComment())) {
+                    sb.append("  // ").append(t.getTableComment());
+                }
+                sb.append('\n');
+                count++;
+                if (count >= 50) {
+                    sb.append("... (结果截断, 最多显示 50 条)");
+                    break;
+                }
+            }
+        }
+        if (count == 0) {
+            sb.append("(未匹配到表)");
+        }
+        return textContent(sb.toString());
+    }
+
+    private Map<String, Object> optimizeSql(Long connId, String sql, Long userId) {
+        requireSql(sql);
+        Map<String, Object> result = aiAssistService.optimize(connId, sql, userId);
+        aiAssistService.audit(userId, connId, "MCP_CALL", "optimize_sql",
+            StrUtil.maxLength(sql, 300),
+            "suggestions=" + result.get("suggestionCount"), "LOW");
+        @SuppressWarnings("unchecked")
+        List<String> suggestions = (List<String>) result.get("suggestions");
+        StringBuilder sb = new StringBuilder("SQL 优化建议(共 " + suggestions.size() + " 条):\n");
+        for (int i = 0; i < suggestions.size(); i++) {
+            sb.append(i + 1).append(". ").append(suggestions.get(i)).append('\n');
+        }
+        return textContent(sb.toString());
     }
 
     // ================= 辅助 =================

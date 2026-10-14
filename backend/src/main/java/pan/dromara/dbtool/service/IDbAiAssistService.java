@@ -25,4 +25,19 @@ public interface IDbAiAssistService {
      * 元数据上下文(供前端提示/调试): 库列表、表列表(含列)
      */
     Map<String, Object> context(Long connId, String schema, Long userId);
+
+    /**
+     * 审计日志查询: 分页查询 AI/MCP 调用审计记录
+     *
+     * @param userId   当前用户ID(null=全部, 管理员可查所有)
+     * @param action   动作过滤(AI_ASSIST/AI_EXPLAIN/MCP_CALL, null=全部)
+     * @param pageNum  页码(从 1 开始)
+     * @param pageSize 每页条数
+     */
+    Map<String, Object> auditList(Long userId, String action, int pageNum, int pageSize);
+
+    /**
+     * AI SQL 优化建议: 基于 EXPLAIN 结果和 SQL 文本给出索引/改写建议
+     */
+    Map<String, Object> optimize(Long connId, String sql, Long userId);
 }

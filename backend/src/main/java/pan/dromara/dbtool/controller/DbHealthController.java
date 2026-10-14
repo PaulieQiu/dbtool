@@ -2,9 +2,7 @@ package pan.dromara.dbtool.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import org.dromara.common.core.domain.R;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 import pan.dromara.dbtool.core.DbConnectionManager;
 
 import java.util.Map;
@@ -32,5 +30,15 @@ public class DbHealthController {
     @GetMapping
     public R<Map<String, Object>> pool() {
         return R.ok(connectionManager.poolStats());
+    }
+
+    /**
+     * 强制关闭指定连接的连接池(运维/排障用)
+     */
+    @SaCheckPermission("dbtool:conn:list")
+    @PostMapping("/close-pool/{connId}")
+    public R<Void> closePool(@PathVariable Long connId) {
+        connectionManager.closePool(connId);
+        return R.ok();
     }
 }

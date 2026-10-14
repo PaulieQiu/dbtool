@@ -56,4 +56,25 @@ public class DbAiController {
     public R<Map<String, Object>> context(@RequestParam Long connId, @RequestParam(required = false) String schema) {
         return R.ok(aiAssistService.context(connId, schema, LoginHelper.getUserId()));
     }
+
+    /** 审计日志列表(分页, 可按用户/动作过滤) */
+    @SaCheckPermission("dbtool:meta:list")
+    @GetMapping("/audit/list")
+    public R<Map<String, Object>> auditList(
+        @RequestParam(required = false) Long userId,
+        @RequestParam(required = false) String action,
+        @RequestParam(defaultValue = "1") int pageNum,
+        @RequestParam(defaultValue = "20") int pageSize) {
+        return R.ok(aiAssistService.auditList(userId, action, pageNum, pageSize));
+    }
+
+    /** AI SQL 优化建议(基于规则 + EXPLAIN 分析) */
+    @SaCheckPermission("dbtool:meta:list")
+    @PostMapping("/optimize")
+    public R<Map<String, Object>> optimize(@RequestBody Map<String, Object> body) {
+        Long connId = body == null || body.get("connId") == null
+            ? null : Long.valueOf(String.valueOf(body.get("connId")));
+        String sql = body == null ? null : String.valueOf(body.get("sql"));
+        return R.ok(aiAssistService.optimize(connId, sql, LoginHelper.getUserId()));
+    }
 }

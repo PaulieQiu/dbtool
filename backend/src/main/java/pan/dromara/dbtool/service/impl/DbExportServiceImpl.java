@@ -13,6 +13,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.Writer;
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -291,5 +292,55 @@ public class DbExportServiceImpl implements IDbExportService {
         return t.contains("INT") || t.contains("DECIMAL") || t.contains("NUMERIC")
             || t.contains("FLOAT") || t.contains("DOUBLE") || t.contains("REAL")
             || t.equals("NUMBER") || t.equals("BIGINT") || t.equals("SMALLINT");
+    }
+
+    // ==================== Excel 导出 ====================
+
+    @Override
+    public long exportToExcel(Long connId, String sql, long maxRows, OutputStream outputStream) {
+        String trimSql = validateQuery(connId, sql);
+        long limit = maxRows > 0 ? Math.min(maxRows, DEFAULT_MAX_ROWS) : DEFAULT_MAX_ROWS;
+        DbConn conn = metaService.getConn(connId);
+        long exported = 0;
+        // SXSSFWorkbook: 流式写入, 内存中仅保留 200 行窗口
+        try (org.apache.poi.xssf.streaming.SXSSFWorkbook workbook =
+                 new org.apache.poi.xssf.streaming.SXSSFWorkbook(200)) {
+            org.apache.poi.ss.usermodel.Sheet sheet = workbook.createSheet("export");
+            try (Connection connection = connectionManager.getConnection(conn);
+                 Statement stmt = connection.createStatement()) {
+                stmt.setQueryTimeout(properties.getExportTimeoutSeconds());
+                stmt.setFetchSize(1000);
+                try (ResultSet rs = stmt.executeQuery(trimSql)) {
+                    ResultSetMetaData meta = rs.getMetaData();
+                    int colCount = meta.getColumnCount();
+                    // 表头行
+                    org.apache.poi.ss.usermodel.Row headerRow = sheet.createRow(0);
+                    for (int i = 1; i <= colCount; i++) {
+                        headerRow.createCell(i - 1).setCellValue(meta.getColumnLabel(i));
+                    }
+                    // 数据行
+                    int rowIdx = 1;
+                    while (rs.next() && exported < limit) {
+                        org.apache.poi.ss.usermodel.Row dataRow = sheet.createRow(rowIdx++);
+                        for (int i = 1; i <= colCount; i++) {
+                            String value = rs.getString(i);
+                            if (value == null) {
+                                dataRow.createCell(i - 1).setBlank();
+                            } else {
+                                dataRow.createCell(i - 1).setCellValue(value);
+                            }
+                        }
+                        exported++;
+                    }
+                }
+            }
+            workbook.write(outputStream);
+            workbook.dispose(); // 清理临时文件
+        } catch (SQLException e) {
+            throw new ServiceException("Excel 导出失败: " + e.getMessage());
+        } catch (IOException e) {
+            throw new ServiceException("Excel 写入失败: " + e.getMessage());
+        }
+        return exported;
     }
 }
